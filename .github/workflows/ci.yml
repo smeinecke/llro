@@ -39,7 +39,7 @@ jobs:
 
   test-py37:
     name: Install + Smoke + Tests (Python 3.7)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -64,7 +64,7 @@ jobs:
 
   docker-integration:
     name: Docker Integration (Route Switchover)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code

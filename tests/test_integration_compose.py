@@ -53,7 +53,9 @@ def _wait_for_route(
     return False
 
 
-def _ping_from_source(compose_file: Path, project_name: str, source_ip: str, target_ip: str, env: Dict[str, str]) -> bool:
+def _ping_from_source(
+    compose_file: Path, project_name: str, source_ip: str, target_ip: str, env: Dict[str, str]
+) -> bool:
     ping = _run(
         [
             "docker",
@@ -217,7 +219,9 @@ def test_route_switchover_when_icmp_blocked_on_one_path() -> None:
             ],
             env=compose_env,
         )
-        assert drop_icmp_reply.returncode == 0, "failed to apply target ICMP reply drop rule:\n%s" % drop_icmp_reply.stderr
+        assert drop_icmp_reply.returncode == 0, (
+            "failed to apply target ICMP reply drop rule:\n%s" % drop_icmp_reply.stderr
+        )
 
         confirm_drop = _ping_from_source(
             compose_file,

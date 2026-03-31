@@ -57,9 +57,7 @@ def _format_status_table(hosts: List[Dict[str, Any]]) -> str:
             avg_rtt = route_data.get("avg_rtt")
             avg_loss = route_data.get("avg_loss")
             is_alive = "yes" if route_data.get("is_alive") else "no"
-            lines.append(
-                "  %s: rtt=%s ms, loss=%s%%, alive=%s" % (route_name, avg_rtt, avg_loss, is_alive)
-            )
+            lines.append("  %s: rtt=%s ms, loss=%s%%, alive=%s" % (route_name, avg_rtt, avg_loss, is_alive))
     return "\n".join(lines)
 
 
