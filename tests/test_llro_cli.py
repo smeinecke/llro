@@ -60,7 +60,7 @@ def test_send_request_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         def __enter__(self):  # type: ignore[no-untyped-def]
             return self
 
-        def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+        def __exit__(self, _exc_type, _exc, _tb):  # type: ignore[no-untyped-def]
             return False
 
         def settimeout(self, _value: float) -> None:
