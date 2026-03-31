@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -23,6 +24,20 @@ DEFAULT_ADMIN_SOCKET_PATH = "/run/llro/admin.sock"
 
 class ConfigError(ValueError):
     pass
+
+
+def _as_float(value: Any, field_name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError("%s must be a number" % field_name)
+
+
+def _as_int(value: Any, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ConfigError("%s must be an integer" % field_name)
 
 
 def _as_non_empty_string(value: Any, field_name: str) -> str:
@@ -149,15 +164,16 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
             raise ConfigError("Duplicate route name '%s'" % route["name"])
         route_names.add(route["name"])
 
-    test_count = int(raw_config.get("test_count", 3))
+    test_count = _as_int(raw_config.get("test_count", 3), "test_count")
     if test_count <= 0:
         raise ConfigError("test_count must be greater than 0")
 
-    packet_loss_threshold = float(
+    packet_loss_threshold = _as_float(
         raw_config.get(
             "packet_loss_threshold",
             raw_config.get("paketloss_threshold", 5),
-        )
+        ),
+        "packet_loss_threshold",
     )
 
     normalized = {
@@ -165,13 +181,13 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "also_route": also_route,
         "routes": routes,
         "fallback_routes": _normalize_fallback_routes(raw_config.get("fallback_routes"), monitor, routes),
-        "rtt_threshold": float(raw_config.get("rtt_threshold", 20)),
+        "rtt_threshold": _as_float(raw_config.get("rtt_threshold", 20), "rtt_threshold"),
         "packet_loss_threshold": packet_loss_threshold,
         # Keep legacy key to avoid breaking existing consumers/tests.
         "paketloss_threshold": packet_loss_threshold,
         "test_count": test_count,
-        "test_interval": float(raw_config.get("test_interval", 0.5)),
-        "scan_interval": float(raw_config.get("scan_interval", 10)),
+        "test_interval": _as_float(raw_config.get("test_interval", 0.5), "test_interval"),
+        "scan_interval": _as_float(raw_config.get("scan_interval", 10), "scan_interval"),
         "delete_preadded_routes": bool(raw_config.get("delete_preadded_routes", False)),
         "ip_bin": _as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"),
         "admin_socket_path": _as_non_empty_string(
@@ -215,10 +231,21 @@ class LowestLatencyRoutesOptimizer:
         asyncio.run(self.run_service())
 
     async def run_service(self) -> None:
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        can_handle_signals = hasattr(loop, "add_signal_handler")
+
+        if can_handle_signals:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+
         await self._start_admin_server()
         try:
-            await self.run_async()
+            await self.run_async(stop_event)
         finally:
+            if can_handle_signals:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.remove_signal_handler(sig)
             await self._stop_admin_server()
 
     async def _start_admin_server(self) -> None:
@@ -469,7 +496,7 @@ class LowestLatencyRoutesOptimizer:
                 continue
             self.current_routes[destination] = route_name
 
-    async def run_async(self):
+    async def run_async(self, stop_event: Optional[asyncio.Event] = None):
         """
         Runs the main loop of the optimizer.
 
@@ -483,7 +510,7 @@ class LowestLatencyRoutesOptimizer:
         """
         checks = 0
         sums = {}  # host -> route_name -> {"rtt": sum, "loss": sum}
-        while True:
+        while not (stop_event is not None and stop_event.is_set()):
             # send ICMP requests
             tasks = []
             route_names = []
@@ -642,7 +669,14 @@ class LowestLatencyRoutesOptimizer:
                         logging.warning("No fallback routes configured for %s", sip)
                         self.clear_route(sip)
 
-            await asyncio.sleep(self.config["scan_interval"])
+            if stop_event is None:
+                await asyncio.sleep(self.config["scan_interval"])
+                continue
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self.config["scan_interval"])
+            except asyncio.TimeoutError:
+                pass
 
 
 def main() -> None:

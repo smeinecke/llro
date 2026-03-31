@@ -7,19 +7,29 @@ from typing import Any, Dict, List
 
 from llro import DEFAULT_ADMIN_SOCKET_PATH
 
+DEFAULT_SOCKET_TIMEOUT_SECONDS = 5.0
 
-def _send_request(socket_path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+
+def _send_request(
+    socket_path: str, payload: Dict[str, Any], timeout_seconds: float = DEFAULT_SOCKET_TIMEOUT_SECONDS
+) -> Dict[str, Any]:
     message = (json.dumps(payload) + "\n").encode("utf-8")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout_seconds)
         try:
             client.connect(socket_path)
+        except socket.timeout:
+            raise RuntimeError("connection to %s timed out after %.1fs" % (socket_path, timeout_seconds))
         except OSError as exc:
             raise RuntimeError("failed to connect to %s: %s" % (socket_path, exc))
 
         client.sendall(message)
         chunks = []
         while True:
-            chunk = client.recv(4096)
+            try:
+                chunk = client.recv(4096)
+            except socket.timeout:
+                raise RuntimeError("read from %s timed out after %.1fs" % (socket_path, timeout_seconds))
             if not chunk:
                 break
             chunks.append(chunk)

@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/lowest-latency-routes-optimizer
+      url: https://pypi.org/p/llro
     permissions:
       id-token: write
 

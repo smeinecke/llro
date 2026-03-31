@@ -407,6 +407,33 @@ def test_normalize_config_duplicate_and_threshold_validation() -> None:
         llro.normalize_config(cfg)
 
 
+def test_normalize_config_rejects_non_numeric_thresholds() -> None:
+    cfg = make_routes_config()
+    cfg["rtt_threshold"] = "fast"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["packet_loss_threshold"] = "low"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["test_interval"] = "soon"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["scan_interval"] = "later"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["test_count"] = "many"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+
 def test_normalize_fallback_rejects_unknown_host_and_accepts_unique_gateway() -> None:
     cfg = {
         "monitor": ["1.1.1.1"],
@@ -517,8 +544,9 @@ def test_run_service_starts_and_stops_admin_server(monkeypatch: pytest.MonkeyPat
     async def fake_start() -> None:
         calls.append("start")
 
-    async def fake_run() -> None:
+    async def fake_run(_stop_event: asyncio.Event = None) -> None:  # type: ignore[assignment]
         calls.append("run")
+        assert _stop_event is not None
 
     async def fake_stop() -> None:
         calls.append("stop")
@@ -528,6 +556,32 @@ def test_run_service_starts_and_stops_admin_server(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(optimizer, "_stop_admin_server", fake_stop)
     asyncio.run(optimizer.run_service())
     assert calls == ["start", "run", "stop"]
+
+
+def test_run_async_stops_when_stop_event_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make_routes_config()
+    cfg["scan_interval"] = 60
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    probe_calls = {"count": 0}
+
+    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+        probe_calls["count"] += 1
+        return [make_host("1.1.1.1", True, 10, 0)]
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+
+    async def runner() -> None:
+        stop_event = asyncio.Event()
+
+        async def fake_wait_for(awaitable, timeout):  # type: ignore[no-untyped-def]
+            stop_event.set()
+            return await awaitable
+
+        monkeypatch.setattr(llro.asyncio, "wait_for", fake_wait_for)
+        await optimizer.run_async(stop_event=stop_event)
+
+    asyncio.run(runner())
+    assert probe_calls["count"] == 1
 
 
 def test_admin_server_start_and_stop_with_real_socket(tmp_path) -> None:  # type: ignore[no-untyped-def]

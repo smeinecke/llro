@@ -2,6 +2,10 @@
 
 Service to measure ICMP latency from multiple uplinks and keep per-host `/32` routes pinned to the best path.
 
+LLRO continuously probes each monitored destination through each configured uplink source, compares packet loss and latency, and installs host routes using Linux `ip route` so traffic for that destination follows the healthiest path. It can freeze or override routing decisions per host through a local admin socket, and it can fall back to predefined routes when probes fail. In short, it automates per-destination path selection based on live network conditions instead of static one-time routing choices.
+
+For a deeper technical walkthrough, see [HOW_IT_WORKS.md](/home/stefan/github/LowestLatencyRoutesOptimizer/HOW_IT_WORKS.md).
+
 ## Runtime requirements
 
 - Linux with `iproute2` (`ip` command available, default path `/usr/sbin/ip`)

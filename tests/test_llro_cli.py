@@ -55,6 +55,26 @@ def test_send_request_roundtrip(tmp_path) -> None:  # type: ignore[no-untyped-de
     assert response["data"]["hello"] == "world"
 
 
+def test_send_request_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TimeoutSocket:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+            return False
+
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def connect(self, _path: str) -> None:
+            raise socket.timeout()
+
+    monkeypatch.setattr(llro_cli.socket, "socket", lambda *_args, **_kwargs: TimeoutSocket())
+    with pytest.raises(RuntimeError) as exc:
+        llro_cli._send_request("/tmp/admin.sock", {"action": "status"}, timeout_seconds=0.1)
+    assert "timed out" in str(exc.value)
+
+
 def test_main_status_table_output(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(
         llro_cli,
