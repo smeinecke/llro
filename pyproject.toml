@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=65,<69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llro"
+version = "0.1.0"
+description = "Service to get lowest latency route to targets and set static routes."
+readme = "README.md"
+requires-python = ">=3.7"
+license = { text = "MIT" }
+authors = [{ name = "LLRO contributors" }]
+keywords = ["network", "routing", "latency", "icmp"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: System :: Networking",
+]
+dependencies = [
+  "icmplib==3.0.4",
+  "PyYAML==6.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/greensec/LowestLatencyRoutesOptimizer"
+Repository = "https://github.com/greensec/LowestLatencyRoutesOptimizer"
+Issues = "https://github.com/greensec/LowestLatencyRoutesOptimizer/issues"
+
+[project.scripts]
+llro = "llro:main"
+llro-cli = "llro_cli:main"
+
+[tool.setuptools]
+py-modules = ["llro", "llro_cli"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[dependency-groups]
+dev = [
+  "build>=1.2.2; python_version >= '3.8'",
+  "pyright>=1.1.408; python_version >= '3.8'",
+  "pytest>=7.4,<8; python_version < '3.8'",
+  "pytest>=8.3; python_version >= '3.8'",
+  "pytest-cov>=4.1,<5; python_version < '3.8'",
+  "pytest-cov>=5; python_version >= '3.8'",
+  "ruff>=0.12.0; python_version >= '3.8'",
+  "twine>=6.1.0; python_version >= '3.8'",
+  "vulture>=2.14; python_version >= '3.8'",
+  "xenon>=0.9.3; python_version >= '3.8'",
+]
+
+[tool.ruff]
+exclude = ["dist", "build", ".venv"]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+addopts = [
+  "-q",
+  "--cov=llro",
+  "--cov-report=term-missing",
+]
+pythonpath = ["src"]
+markers = [
+  "integration: real integration tests that require external services/tools",
+]
+
+[tool.pyright]
+pythonVersion = "3.7"
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/node_modules", "**/dist", "**/build", "**/.venv"]
+
+[tool.vulture]
+exclude = ["dist", "build", "venv", ".venv", "tests"]
+min_confidence = 80
+paths = ["src"]
+sort_by_size = true

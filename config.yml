@@ -2,19 +2,22 @@
 monitor:
   - 1.1.1.1
 
+routes:
+  - name: wan_primary
+    device: eth0
+    probe_source: 192.168.0.8
+    gateway: 192.168.0.1
+  - name: loopback_test
+    device: lo
+    probe_source: 127.0.0.1
+    gateway: 127.0.0.1
+
 also_route:
   1.1.1.1:
     - 1.0.0.1
 
-interfaces:
-  eth0:
-    - 192.168.0.8
-
-  lo:
-    - 127.0.0.1
-
 rtt_threshold: 20
-paketloss_threshold: 2
+packet_loss_threshold: 2
 test_count: 5
 test_interval: 2
 scan_interval: 30

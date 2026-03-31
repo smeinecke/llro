@@ -1,0 +1,51 @@
+services:
+  llro:
+    build:
+      context: ../..
+      dockerfile: tests/integration/images/llro/Dockerfile
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - target
+    command: ["/usr/local/bin/run-llro-test.sh"]
+    environment:
+      MONITOR_IP: ${MONITOR_IP}
+      WAN_A_SOURCE_IP: ${WAN_A_SOURCE_IP}
+      WAN_B_SOURCE_IP: ${WAN_B_SOURCE_IP}
+      WAN_A_GATEWAY_IP: ${WAN_A_GATEWAY_IP}
+      WAN_B_GATEWAY_IP: ${WAN_B_GATEWAY_IP}
+    networks:
+      wan_a:
+        ipv4_address: ${WAN_A_SOURCE_IP}
+      wan_b:
+        ipv4_address: ${WAN_B_SOURCE_IP}
+
+  target:
+    build:
+      context: ../..
+      dockerfile: tests/integration/images/target/Dockerfile
+    cap_add:
+      - NET_ADMIN
+    command: ["/usr/local/bin/run-target.sh"]
+    environment:
+      MONITOR_IP: ${MONITOR_IP}
+    networks:
+      wan_a:
+        ipv4_address: ${WAN_A_TARGET_IP}
+      wan_b:
+        ipv4_address: ${WAN_B_TARGET_IP}
+
+networks:
+  wan_a:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${WAN_A_SUBNET}
+          gateway: ${WAN_A_DOCKER_GW}
+  wan_b:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${WAN_B_SUBNET}
+          gateway: ${WAN_B_DOCKER_GW}

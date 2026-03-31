@@ -1,0 +1,33 @@
+---
+monitor:
+  - 1.1.1.1
+  - 8.8.8.8
+
+routes:
+  - name: wan_fiber
+    device: eth0
+    probe_source: 192.168.0.8
+    gateway: 192.168.0.1
+  - name: wan_lte
+    device: wwan0
+    probe_source: 10.0.0.2
+    gateway: 10.0.0.1
+
+also_route:
+  1.1.1.1:
+    - 1.0.0.1
+  8.8.8.8:
+    - 8.8.4.4
+
+fallback_routes:
+  1.1.1.1: wan_fiber
+  8.8.8.8: wan_lte
+
+rtt_threshold: 20
+packet_loss_threshold: 2
+test_count: 5
+test_interval: 1
+scan_interval: 30
+delete_preadded_routes: true
+# ip_bin: /usr/sbin/ip
+# admin_socket_path: /run/llro/admin.sock

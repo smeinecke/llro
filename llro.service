@@ -6,7 +6,7 @@ StartLimitBurst=5
 
 [Service]
 SyslogIdentifier=LLRO
-ExecStart=/usr/local/bin/llro.py --config /etc/llro.yml
+ExecStart=/usr/bin/env llro --config /etc/llro.yml
 User=root
 Group=root
 KillMode=process
