@@ -1144,7 +1144,7 @@ dependencies = [
 dev = [
     { name = "build", version = "1.2.2.post1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "build", version = "1.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-    { name = "pyright", marker = "python_full_version >= '3.8'" },
+    { name = "pyright" },
     { name = "pytest", version = "7.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "pytest", version = "8.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "pytest", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
@@ -1152,9 +1152,10 @@ dev = [
     { name = "pytest-cov", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "pytest-cov", version = "5.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "pytest-cov", version = "7.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-    { name = "ruff", marker = "python_full_version >= '3.8'" },
+    { name = "ruff" },
     { name = "twine", version = "6.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "twine", version = "6.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "vulture", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "vulture", version = "2.14", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "vulture", version = "2.16", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "xenon", marker = "python_full_version >= '3.8'" },
@@ -1170,13 +1171,16 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "build", marker = "python_full_version >= '3.8'", specifier = ">=1.2.2" },
+    { name = "pyright", specifier = ">=1.1.408" },
     { name = "pyright", marker = "python_full_version >= '3.8'", specifier = ">=1.1.408" },
     { name = "pytest", marker = "python_full_version < '3.8'", specifier = ">=7.4,<8" },
     { name = "pytest", marker = "python_full_version >= '3.8'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "python_full_version < '3.8'", specifier = ">=4.1,<5" },
     { name = "pytest-cov", marker = "python_full_version >= '3.8'", specifier = ">=5" },
+    { name = "ruff", specifier = ">=0.15.8" },
     { name = "ruff", marker = "python_full_version >= '3.8'", specifier = ">=0.12.0" },
     { name = "twine", marker = "python_full_version >= '3.8'", specifier = ">=6.1.0" },
+    { name = "vulture", specifier = ">=2.9.1" },
     { name = "vulture", marker = "python_full_version >= '3.8'", specifier = ">=2.14" },
     { name = "xenon", marker = "python_full_version >= '3.8'", specifier = ">=0.9.3" },
 ]
@@ -1431,7 +1435,8 @@ name = "pyright"
 version = "1.1.408"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nodeenv", marker = "python_full_version >= '3.8'" },
+    { name = "nodeenv" },
+    { name = "typing-extensions", version = "4.7.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "typing-extensions", version = "4.13.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
 ]
@@ -1932,6 +1937,15 @@ wheels = [
 ]
 
 [[package]]
+name = "toml"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/be/ba/1f744cdc819428fc6b5084ec34d9b30660f6f9daaf70eead706e3203ec3c/toml-0.10.2.tar.gz", hash = "sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f", size = 22253 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/6f/7120676b6d73228c96e17f1f794d8ab046fc910d781c8d151120c3f1569e/toml-0.10.2-py2.py3-none-any.whl", hash = "sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b", size = 16588 },
+]
+
+[[package]]
 name = "tomli"
 version = "2.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2112,6 +2126,21 @@ resolution-markers = [
 sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6661c76461e25f024d5a38a46f04aaca912426a2b1d3/urllib3-2.6.3.tar.gz", hash = "sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed", size = 435556 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584 },
+]
+
+[[package]]
+name = "vulture"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.8'",
+]
+dependencies = [
+    { name = "toml", marker = "python_full_version < '3.8'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/5d/4734f4808f63e8b7897cef965a5413e94845eafbc256f70126c0c462a84d/vulture-2.9.1.tar.gz", hash = "sha256:b6a2aa632b6fd51488a8eeac650ab4a509bb1a032e81943817a8a2e6a63a30b3", size = 55562 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/34/5316de99249db1fe18c3e1e4ed10cf51f03d689f241e0066bfbabbaf38d5/vulture-2.9.1-py2.py3-none-any.whl", hash = "sha256:a46857014619bd4b785a506b9ddb738cd4621043558309b03a879d18f86e2d72", size = 28049 },
 ]
 
 [[package]]

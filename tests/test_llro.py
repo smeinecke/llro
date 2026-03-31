@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 from types import SimpleNamespace
 from typing import List
 
@@ -460,7 +459,9 @@ def test_run_ip_handles_exception_stdout_and_exit_code(monkeypatch: pytest.Monke
     assert "exit code 3" in err
 
 
-def test_clear_route_logs_error_for_unexpected_failure(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_clear_route_logs_error_for_unexpected_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
     monkeypatch.setattr(optimizer, "_run_ip", lambda _args: (False, "permission denied"))
     caplog.set_level(logging.ERROR)
