@@ -45,7 +45,7 @@ jobs:
       name: testpypi
       url: https://test.pypi.org/p/llro
     permissions:
-      contents: read
+      id-token: write
 
     steps:
       - name: Download artifacts
@@ -58,5 +58,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          user: __token__
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
