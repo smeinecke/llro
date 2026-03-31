@@ -1,4 +1,8 @@
 import asyncio
+import json
+import logging
+import os
+import socket
 from types import SimpleNamespace
 from typing import List
 
@@ -359,3 +363,288 @@ def test_run_async_freeze_blocks_switching(monkeypatch: pytest.MonkeyPatch) -> N
         asyncio.run(optimizer.run_async())
 
     assert applied == []
+
+
+def test_normalize_config_validation_errors() -> None:
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config("not-a-mapping")  # type: ignore[arg-type]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": "1.1.1.1", "routes": []})  # type: ignore[dict-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "also_route": [], "routes": []})  # type: ignore[dict-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "also_route": {"1.1.1.1": "x"}, "routes": []})  # type: ignore[dict-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "routes": "bad"})  # type: ignore[dict-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "routes": ["bad"]})  # type: ignore[list-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "interfaces": {}, "routes": None})  # type: ignore[dict-item]
+
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config({"monitor": ["1.1.1.1"], "interfaces": {"eth0": []}, "routes": None})  # type: ignore[dict-item]
+
+
+def test_normalize_config_duplicate_and_threshold_validation() -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "dup", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "dup", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+    }
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["test_count"] = 0
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_fallback_rejects_unknown_host_and_accepts_unique_gateway() -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+        ],
+        "fallback_routes": {"2.2.2.2": "wan_a"},
+    }
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+    cfg["fallback_routes"] = {"1.1.1.1": "10.0.0.254"}
+    normalized = llro.normalize_config(cfg)
+    assert normalized["fallback_routes"]["1.1.1.1"] == "wan_a"
+
+
+def test_resolve_targets_supports_all_and_rejects_invalid_host() -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+    assert optimizer._resolve_targets({"all": True}) == ["1.1.1.1"]
+    assert optimizer._resolve_targets({"host": "8.8.8.8"}) is None
+
+
+def test_run_ip_handles_exception_stdout_and_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+
+    def raise_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise OSError("boom")
+
+    monkeypatch.setattr(llro.subprocess, "run", raise_error)
+    ok, err = optimizer._run_ip(["route", "show"])
+    assert ok is False
+    assert "boom" in err
+
+    monkeypatch.setattr(
+        llro.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="shown", stderr=""),
+    )
+    ok, err = optimizer._run_ip(["route", "show"])
+    assert ok is True
+    assert err == ""
+
+    monkeypatch.setattr(
+        llro.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=3, stdout="", stderr=""),
+    )
+    ok, err = optimizer._run_ip(["route", "show"])
+    assert ok is False
+    assert "exit code 3" in err
+
+
+def test_clear_route_logs_error_for_unexpected_failure(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+    monkeypatch.setattr(optimizer, "_run_ip", lambda _args: (False, "permission denied"))
+    caplog.set_level(logging.ERROR)
+    optimizer.clear_route("1.1.1.1")
+    assert "Failed to remove route for 1.1.1.1" in caplog.text
+
+
+def test_apply_route_config_logs_errors(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+
+    caplog.set_level(logging.ERROR)
+    optimizer.apply_route_config("1.1.1.1", "missing")
+    assert "Unknown route 'missing'" in caplog.text
+
+    calls = {"count": 0}
+
+    def fail_add_then_replace(_args):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return False, "unexpected add failure"
+        return False, "replace failed"
+
+    monkeypatch.setattr(optimizer, "_run_ip", fail_add_then_replace)
+    optimizer.current_routes["1.1.1.1"] = "wan_a"
+    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    assert "Failed to replace route for 1.1.1.1" in caplog.text
+
+    optimizer.current_routes.clear()
+    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    assert "Failed to add route for 1.1.1.1" in caplog.text
+
+
+def test_clear_routes_applies_fallback_and_clears_tracking(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make_routes_config()
+    cfg["also_route"] = {"1.1.1.1": ["1.0.0.1"]}
+    cfg["fallback_routes"] = {"1.1.1.1": "wan_a"}
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a", "1.0.0.1": "wan_a"}
+    cleared = []
+    applied = []
+    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
+    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+    optimizer.clear_routes()
+    assert set(cleared) == {"1.1.1.1", "1.0.0.1"}
+    assert optimizer.current_routes == {}
+    assert applied == [("1.1.1.1", "wan_a")]
+
+
+def test_run_service_starts_and_stops_admin_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+    calls = []
+
+    async def fake_start() -> None:
+        calls.append("start")
+
+    async def fake_run() -> None:
+        calls.append("run")
+
+    async def fake_stop() -> None:
+        calls.append("stop")
+
+    monkeypatch.setattr(optimizer, "_start_admin_server", fake_start)
+    monkeypatch.setattr(optimizer, "run_async", fake_run)
+    monkeypatch.setattr(optimizer, "_stop_admin_server", fake_stop)
+    asyncio.run(optimizer.run_service())
+    assert calls == ["start", "run", "stop"]
+
+
+def test_admin_server_start_and_stop_with_real_socket(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    socket_path = str(tmp_path / "admin.sock")
+    cfg = make_routes_config()
+    cfg["admin_socket_path"] = socket_path
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    asyncio.run(optimizer._start_admin_server())
+    assert os.path.exists(socket_path)
+    asyncio.run(optimizer._stop_admin_server())
+    assert not os.path.exists(socket_path)
+
+
+def test_admin_server_start_rejects_non_socket_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    socket_path = tmp_path / "admin.sock"
+    socket_path.write_text("not a socket", encoding="utf-8")
+    cfg = make_routes_config()
+    cfg["admin_socket_path"] = str(socket_path)
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    with pytest.raises(RuntimeError):
+        asyncio.run(optimizer._start_admin_server())
+
+
+def test_handle_admin_client_invalid_json_and_handler_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    async def run_case(request_line: bytes, action_impl, sock_path: str):  # type: ignore[no-untyped-def]
+        optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+        setattr(optimizer, "_handle_admin_action", action_impl)
+
+        server = await asyncio.start_unix_server(optimizer._handle_admin_client, path=sock_path)
+        client_reader, client_writer = await asyncio.open_unix_connection(path=sock_path)
+        client_writer.write(request_line)
+        await client_writer.drain()
+        response = await client_reader.readline()
+        client_writer.close()
+        await client_writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+        return json.loads(response.decode("utf-8"))
+
+    invalid = asyncio.run(run_case(b"not-json\n", lambda _req: {"ok": True}, str(tmp_path / "invalid.sock")))
+    assert invalid["ok"] is False
+    assert "invalid JSON" in invalid["error"]
+
+    async def fail_action(_request):  # type: ignore[no-untyped-def]
+        raise RuntimeError("explode")
+
+    failed = asyncio.run(run_case(b'{"action":"status"}\n', fail_action, str(tmp_path / "error.sock")))
+    assert failed["ok"] is False
+    assert "explode" in failed["error"]
+
+
+def test_admin_action_validation_errors() -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+    response = asyncio.run(optimizer._handle_admin_action("bad"))  # type: ignore[arg-type]
+    assert response["ok"] is False
+    assert "JSON object" in response["error"]
+
+    response = asyncio.run(optimizer._handle_admin_action({"action": "override", "host": 1, "route": None}))
+    assert response["ok"] is False
+
+    response = asyncio.run(optimizer._handle_admin_action({"action": "override", "host": "9.9.9.9", "route": "wan_a"}))
+    assert response["ok"] is False
+
+    response = asyncio.run(optimizer._handle_admin_action({"action": "disable_switching"}))
+    assert response["ok"] is False
+
+    response = asyncio.run(optimizer._handle_admin_action({"action": "reset_auto"}))
+    assert response["ok"] is False
+
+
+def test_main_error_paths_and_debug_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    missing = tmp_path / "missing.yml"
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(missing)])
+    with pytest.raises(SystemExit) as exc:
+        llro.main()
+    assert exc.value.code == 1
+
+    bad_yaml = tmp_path / "bad.yml"
+    bad_yaml.write_text(":\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(bad_yaml)])
+    with pytest.raises(SystemExit) as exc:
+        llro.main()
+    assert exc.value.code == 1
+
+    empty_yaml = tmp_path / "empty.yml"
+    empty_yaml.write_text("", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(empty_yaml)])
+    with pytest.raises(SystemExit) as exc:
+        llro.main()
+    assert exc.value.code == 1
+
+    invalid_cfg = tmp_path / "invalid.yml"
+    invalid_cfg.write_text("monitor: [1.1.1.1]\nroutes: []\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(invalid_cfg)])
+    with pytest.raises(SystemExit) as exc:
+        llro.main()
+    assert exc.value.code == 1
+
+    valid_cfg = tmp_path / "valid.yml"
+    valid_cfg.write_text(
+        (
+            "monitor:\n"
+            "  - 1.1.1.1\n"
+            "routes:\n"
+            "  - name: wan_a\n"
+            "    device: eth0\n"
+            "    probe_source: 10.0.0.1\n"
+            "    gateway: 10.0.0.254\n"
+            "debug: true\n"
+        ),
+        encoding="utf-8",
+    )
+    called = {"run": 0}
+
+    def fake_run(self) -> None:  # type: ignore[no-untyped-def]
+        called["run"] += 1
+
+    monkeypatch.setattr(llro.LowestLatencyRoutesOptimizer, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(valid_cfg)])
+    llro.main()
+    assert called["run"] == 1

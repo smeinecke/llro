@@ -24,11 +24,13 @@ def test_make_payload_disable_all() -> None:
 def test_send_request_roundtrip(tmp_path) -> None:  # type: ignore[no-untyped-def]
     sock_path = str(tmp_path / "admin.sock")
     received = {}
+    server_ready = threading.Event()
 
     def server() -> None:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
             srv.bind(sock_path)
             srv.listen(1)
+            server_ready.set()
             conn, _ = srv.accept()
             with conn:
                 data = b""
@@ -43,6 +45,7 @@ def test_send_request_roundtrip(tmp_path) -> None:  # type: ignore[no-untyped-de
     thread = threading.Thread(target=server)
     thread.start()
     try:
+        assert server_ready.wait(timeout=5), "server did not start in time"
         response = llro_cli._send_request(sock_path, {"action": "status"})
     finally:
         thread.join(timeout=5)
