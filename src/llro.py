@@ -187,6 +187,7 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "paketloss_threshold": packet_loss_threshold,
         "test_count": test_count,
         "test_interval": _as_float(raw_config.get("test_interval", 0.5), "test_interval"),
+        "payload_size": _as_int(raw_config.get("payload_size", 56), "payload_size"),
         "scan_interval": _as_float(raw_config.get("scan_interval", 10), "scan_interval"),
         "delete_preadded_routes": bool(raw_config.get("delete_preadded_routes", False)),
         "ip_bin": _as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"),
@@ -522,6 +523,7 @@ class LowestLatencyRoutesOptimizer:
                             count=self.config["test_count"],
                             source=route["probe_source"],
                             interval=self.config["test_interval"],
+                            payload_size=self.config["payload_size"],
                         )
                     )
                 )

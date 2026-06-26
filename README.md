@@ -83,6 +83,7 @@ delete_preadded_routes: true
 - `packet_loss_threshold`: packet-loss threshold (%) that can force switching.
 - `test_count`: number of probe rounds aggregated before routing decisions.
 - `test_interval`: interval between ping packets in a probe run.
+- `payload_size`: ICMP Echo Request payload size in bytes.
 - `scan_interval`: delay between scan cycles.
 - `delete_preadded_routes`: remove existing static `/32` routes for monitored hosts on startup.
 - `ip_bin`: optional `ip` binary path override.

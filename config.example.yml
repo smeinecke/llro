@@ -27,6 +27,7 @@ rtt_threshold: 20
 packet_loss_threshold: 2
 test_count: 5
 test_interval: 1
+payload_size: 56
 scan_interval: 30
 delete_preadded_routes: true
 # ip_bin: /usr/sbin/ip

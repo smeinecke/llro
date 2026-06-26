@@ -92,6 +92,26 @@ def test_normalize_config_sets_default_admin_socket_path() -> None:
     assert normalized["admin_socket_path"] == "/run/llro/admin.sock"
 
 
+def test_normalize_config_default_payload_size() -> None:
+    cfg = make_routes_config()
+    normalized = llro.normalize_config(cfg)
+    assert normalized["payload_size"] == 56
+
+
+def test_normalize_config_custom_payload_size() -> None:
+    cfg = make_routes_config()
+    cfg["payload_size"] = 128
+    normalized = llro.normalize_config(cfg)
+    assert normalized["payload_size"] == 128
+
+
+def test_normalize_config_rejects_invalid_payload_size() -> None:
+    cfg = make_routes_config()
+    cfg["payload_size"] = "big"
+    with pytest.raises(llro.ConfigError):
+        llro.normalize_config(cfg)
+
+
 def test_apply_route_config_add_success_tracks_current_route(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make_routes_config()
     cfg["also_route"] = {"1.1.1.1": ["1.0.0.1"]}
@@ -137,6 +157,29 @@ def test_clear_route_ignores_missing_route_error(monkeypatch: pytest.MonkeyPatch
         lambda *_args, **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="RTNETLINK answers: No such process"),
     )
     optimizer.clear_route("1.1.1.1")
+
+
+def test_run_async_forwards_payload_size_to_multiping(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make_routes_config()
+    cfg["payload_size"] = 128
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    captured = {}
+
+    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+        captured["payload_size"] = kwargs.get("payload_size")
+        return [make_host("1.1.1.1", True, 10, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "apply_route_config", lambda _host, _route: None)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert captured.get("payload_size") == 128
 
 
 def test_run_async_applies_best_route_and_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
