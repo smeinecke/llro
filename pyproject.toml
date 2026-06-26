@@ -8,7 +8,7 @@ version = "1.0.1"
 description = "Service to get lowest latency route to targets and set static routes."
 readme = "README.md"
 requires-python = ">=3.7"
-license = "MIT"
+license = { text = "MIT" }
 authors = [{ name = "LLRO contributors" }]
 keywords = ["network", "routing", "latency", "icmp"]
 classifiers = [
