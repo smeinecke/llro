@@ -32,3 +32,4 @@ scan_interval: 30
 delete_preadded_routes: true
 # ip_bin: /usr/sbin/ip
 # admin_socket_path: /run/llro/admin.sock
+# systemd_logging: true

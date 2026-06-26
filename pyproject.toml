@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llro"
-version = "1.0.0"
+version = "1.0.1"
 description = "Service to get lowest latency route to targets and set static routes."
 readme = "README.md"
 requires-python = ">=3.7"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "LLRO contributors" }]
 keywords = ["network", "routing", "latency", "icmp"]
 classifiers = [
@@ -24,9 +24,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/greensec/LowestLatencyRoutesOptimizer"
-Repository = "https://github.com/greensec/LowestLatencyRoutesOptimizer"
-Issues = "https://github.com/greensec/LowestLatencyRoutesOptimizer/issues"
+Homepage = "https://github.com/smeinecke/llro"
+Repository = "https://github.com/smeinecke/llro"
+Issues = "https://github.com/smeinecke/llro/issues"
 
 [project.scripts]
 llro = "llro:main"

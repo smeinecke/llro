@@ -211,19 +211,35 @@ $ llro-cli reset-auto --host 1.1.1.1
 
 ## systemd service
 
-Use the provided unit as a base and verify the executable path in your environment:
+The provided unit runs LLRO under a dedicated unprivileged user with only the network capabilities it needs (`CAP_NET_ADMIN` and `CAP_NET_RAW`).
+
+### Prerequisites
+
+Create the service user and verify the executable path:
 
 ```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin llro
 which llro
+# Update ExecStart in llro.service if the path differs from /usr/local/bin/llro
 ```
 
-Install:
+The unit uses `RuntimeDirectory=llro` so `/run/llro` is created automatically with correct ownership for the admin socket.
+
+### Install
 
 ```bash
 sudo cp llro.service /etc/systemd/system/llro.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now llro
 sudo systemctl status llro
+```
+
+### Verifying capabilities
+
+On a hardened unit, LLRO must still be able to create raw ICMP sockets and modify routes. If the service fails to probe or install routes, check the journal for capability denials:
+
+```bash
+sudo journalctl -u llro -n 50
 ```
 
 ## PyPI release flow

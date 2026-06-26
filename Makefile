@@ -24,7 +24,7 @@ xenon:
 	uv run xenon -b D -m B -a B src
 
 typecheck:
-	uv run pyright
+	PYRIGHT_PYTHON_FORCE_VERSION=latest uv run pyright
 
 test:
 	uv run pytest
@@ -32,7 +32,7 @@ test:
 integration-test:
 	RUN_DOCKER_INTEGRATION=1 uv run --python 3.7 pytest -m integration
 
-validate: format check typecheck vulture
+validate: format check typecheck vulture xenon
 	@echo "Validation passed."
 
 clean:

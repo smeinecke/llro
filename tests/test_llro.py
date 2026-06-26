@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 from types import SimpleNamespace
 from typing import List
 
@@ -30,8 +31,8 @@ def make_routes_config() -> dict:
             }
         ],
         "test_count": 1,
-        "test_interval": 0,
-        "scan_interval": 0,
+        "test_interval": 0.01,
+        "scan_interval": 0.01,
         "rtt_threshold": 20,
         "packet_loss_threshold": 5,
     }
@@ -96,6 +97,19 @@ def test_normalize_config_default_payload_size() -> None:
     cfg = make_routes_config()
     normalized = llro.normalize_config(cfg)
     assert normalized["payload_size"] == 56
+
+
+def test_normalize_config_default_systemd_logging() -> None:
+    cfg = make_routes_config()
+    normalized = llro.normalize_config(cfg)
+    assert normalized["systemd_logging"] is False
+
+
+def test_normalize_config_custom_systemd_logging() -> None:
+    cfg = make_routes_config()
+    cfg["systemd_logging"] = True
+    normalized = llro.normalize_config(cfg)
+    assert normalized["systemd_logging"] is True
 
 
 def test_normalize_config_custom_payload_size() -> None:
@@ -191,8 +205,8 @@ def test_run_async_applies_best_route_and_fallbacks(monkeypatch: pytest.MonkeyPa
         ],
         "fallback_routes": {"2.2.2.2": "wan_a"},
         "test_count": 1,
-        "scan_interval": 0,
-        "test_interval": 0,
+        "scan_interval": 0.01,
+        "test_interval": 0.01,
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     applied = []
@@ -233,7 +247,7 @@ def test_run_async_keeps_current_route_when_diff_below_threshold(monkeypatch: py
         ],
         "test_count": 1,
         "rtt_threshold": 50,
-        "scan_interval": 0,
+        "scan_interval": 0.01,
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
@@ -266,7 +280,7 @@ def test_run_async_switches_on_packet_loss(monkeypatch: pytest.MonkeyPatch) -> N
         ],
         "test_count": 1,
         "packet_loss_threshold": 1,
-        "scan_interval": 0,
+        "scan_interval": 0.01,
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
@@ -348,7 +362,7 @@ def test_run_async_respects_route_override(monkeypatch: pytest.MonkeyPatch) -> N
             {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
         ],
         "test_count": 1,
-        "scan_interval": 0,
+        "scan_interval": 0.01,
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     optimizer.route_modes["1.1.1.1"] = "override"
@@ -381,7 +395,7 @@ def test_run_async_freeze_blocks_switching(monkeypatch: pytest.MonkeyPatch) -> N
             {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
         ],
         "test_count": 1,
-        "scan_interval": 0,
+        "scan_interval": 0.01,
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
@@ -746,3 +760,142 @@ def test_main_error_paths_and_debug_run(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr("sys.argv", ["llro", "--config", str(valid_cfg)])
     llro.main()
     assert called["run"] == 1
+
+
+def test_main_systemd_logging_flag_overrides_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:  # type: ignore[no-untyped-def]
+    valid_cfg = tmp_path / "valid.yml"
+    valid_cfg.write_text(
+        (
+            "monitor:\n"
+            "  - 1.1.1.1\n"
+            "routes:\n"
+            "  - name: wan_a\n"
+            "    device: eth0\n"
+            "    probe_source: 10.0.0.1\n"
+            "    gateway: 10.0.0.254\n"
+        ),
+        encoding="utf-8",
+    )
+    called = {"run": 0}
+
+    def fake_run(self) -> None:  # type: ignore[no-untyped-def]
+        called["run"] += 1
+
+    monkeypatch.setattr(llro.LowestLatencyRoutesOptimizer, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["llro", "--config", str(valid_cfg), "--systemd-logging"])
+    with caplog.at_level(logging.INFO):
+        llro.main()
+    assert called["run"] == 1
+    # Timestamp should be absent from the handler format.
+    for handler in logging.getLogger().handlers:
+        assert "%(asctime)s" not in handler.formatter._fmt  # type: ignore[union-attr]
+
+
+def test_normalize_config_rejects_invalid_monitor_ip() -> None:
+    cfg = make_routes_config()
+    cfg["monitor"] = ["not-an-ip"]
+    with pytest.raises(llro.ConfigError, match="valid IP address"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_invalid_also_route_ip() -> None:
+    cfg = make_routes_config()
+    cfg["also_route"] = {"1.1.1.1": ["bad-ip"]}
+    with pytest.raises(llro.ConfigError, match="valid IP address"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_invalid_route_ip() -> None:
+    cfg = make_routes_config()
+    cfg["routes"][0]["probe_source"] = "bad"
+    with pytest.raises(llro.ConfigError, match="valid IP address"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["routes"][0]["gateway"] = "bad"
+    with pytest.raises(llro.ConfigError, match="valid IP address"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_invalid_device_name() -> None:
+    cfg = make_routes_config()
+    cfg["routes"][0]["device"] = "eth0!"
+    with pytest.raises(llro.ConfigError, match="valid device name"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_non_positive_intervals_and_payload() -> None:
+    cfg = make_routes_config()
+    cfg["test_interval"] = 0
+    with pytest.raises(llro.ConfigError, match="test_interval must be greater than 0"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["scan_interval"] = -1
+    with pytest.raises(llro.ConfigError, match="scan_interval must be greater than 0"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["payload_size"] = 0
+    with pytest.raises(llro.ConfigError, match="payload_size must be greater than 0"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["ip_timeout"] = 0
+    with pytest.raises(llro.ConfigError, match="ip_timeout must be greater than 0"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_relative_ip_bin() -> None:
+    cfg = make_routes_config()
+    cfg["ip_bin"] = "ip"
+    with pytest.raises(llro.ConfigError, match="absolute path"):
+        llro.normalize_config(cfg)
+
+
+def test_run_ip_timeout_logs_distinct_error(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
+
+    def raise_timeout(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(cmd=["/usr/sbin/ip"], timeout=10)
+
+    monkeypatch.setattr(llro.subprocess, "run", raise_timeout)
+    caplog.set_level(logging.ERROR)
+    ok, err = optimizer._run_ip(["route", "show"])
+    assert ok is False
+    assert err == "timeout"
+    assert "timed out" in caplog.text
+
+
+def test_run_async_clears_also_route_on_probe_failure_without_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+        ],
+        "also_route": {"1.1.1.1": ["1.0.0.1"]},
+        "test_count": 1,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a", "1.0.0.1": "wan_a"}
+    cleared = []
+
+    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+        return [make_host("1.1.1.1", False, 0, 100)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
+    monkeypatch.setattr(optimizer, "apply_route_config", lambda _host, _route: None)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert "1.1.1.1" in cleared
+    assert "1.0.0.1" in cleared

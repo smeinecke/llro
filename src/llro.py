@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import stat
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 from icmplib import async_multiping
@@ -46,11 +48,36 @@ def _as_non_empty_string(value: Any, field_name: str) -> str:
     return value.strip()
 
 
+_DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def _validate_ip_address(value: str, field_name: str) -> str:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        raise ConfigError("%s must be a valid IP address, got '%s'" % (field_name, value))
+    return value
+
+
+def _validate_device_name(value: str, field_name: str) -> str:
+    if not _DEVICE_NAME_RE.match(value):
+        raise ConfigError("%s must be a valid device name, got '%s'" % (field_name, value))
+    return value
+
+
+def _validate_ip_bin(value: str, field_name: str) -> str:
+    if not os.path.isabs(value):
+        raise ConfigError("%s must be an absolute path, got '%s'" % (field_name, value))
+    if os.path.exists(value) and not os.access(value, os.X_OK):
+        raise ConfigError("%s is not executable: '%s'" % (field_name, value))
+    return value
+
+
 def _normalize_monitor(config: Dict[str, Any]) -> List[str]:
     monitor = config.get("monitor")
     if not isinstance(monitor, list) or not monitor:
         raise ConfigError("Config does not contain a non-empty monitor list")
-    return [_as_non_empty_string(item, "monitor entry") for item in monitor]
+    return [_validate_ip_address(_as_non_empty_string(item, "monitor entry"), "monitor entry") for item in monitor]
 
 
 def _normalize_also_route(config: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -60,10 +87,13 @@ def _normalize_also_route(config: Dict[str, Any]) -> Dict[str, List[str]]:
 
     normalized = {}
     for host, mapped_hosts in raw_also_route.items():
-        key = _as_non_empty_string(host, "also_route key")
+        key = _validate_ip_address(_as_non_empty_string(host, "also_route key"), "also_route key")
         if not isinstance(mapped_hosts, list):
             raise ConfigError("also_route values must be lists")
-        normalized[key] = [_as_non_empty_string(item, "also_route value") for item in mapped_hosts]
+        normalized[key] = [
+            _validate_ip_address(_as_non_empty_string(item, "also_route value"), "also_route value")
+            for item in mapped_hosts
+        ]
     return normalized
 
 
@@ -78,9 +108,18 @@ def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
             if not isinstance(route, dict):
                 raise ConfigError("routes[%s] must be a mapping" % index)
             name = _as_non_empty_string(route.get("name"), "routes[%s].name" % index)
-            device = _as_non_empty_string(route.get("device"), "routes[%s].device" % index)
-            probe_source = _as_non_empty_string(route.get("probe_source"), "routes[%s].probe_source" % index)
-            gateway = _as_non_empty_string(route.get("gateway"), "routes[%s].gateway" % index)
+            device = _validate_device_name(
+                _as_non_empty_string(route.get("device"), "routes[%s].device" % index),
+                "routes[%s].device" % index,
+            )
+            probe_source = _validate_ip_address(
+                _as_non_empty_string(route.get("probe_source"), "routes[%s].probe_source" % index),
+                "routes[%s].probe_source" % index,
+            )
+            gateway = _validate_ip_address(
+                _as_non_empty_string(route.get("gateway"), "routes[%s].gateway" % index),
+                "routes[%s].gateway" % index,
+            )
             routes.append(
                 {
                     "name": name,
@@ -97,11 +136,17 @@ def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
         raise ConfigError("Config must contain either routes or interfaces")
 
     for device, probe_sources in raw_interfaces.items():
-        dev_name = _as_non_empty_string(device, "interfaces key")
+        dev_name = _validate_device_name(
+            _as_non_empty_string(device, "interfaces key"),
+            "interfaces key",
+        )
         if not isinstance(probe_sources, list) or not probe_sources:
             raise ConfigError("interfaces[%s] must be a non-empty list" % dev_name)
         for probe_source in probe_sources:
-            src = _as_non_empty_string(probe_source, "interfaces[%s] source" % dev_name)
+            src = _validate_ip_address(
+                _as_non_empty_string(probe_source, "interfaces[%s] source" % dev_name),
+                "interfaces[%s] source" % dev_name,
+            )
             # Legacy behavior treated source and gateway as the same value.
             routes.append(
                 {
@@ -176,6 +221,18 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "packet_loss_threshold",
     )
 
+    test_interval = _as_float(raw_config.get("test_interval", 0.5), "test_interval")
+    if test_interval <= 0:
+        raise ConfigError("test_interval must be greater than 0")
+
+    payload_size = _as_int(raw_config.get("payload_size", 56), "payload_size")
+    if payload_size <= 0:
+        raise ConfigError("payload_size must be greater than 0")
+
+    scan_interval = _as_float(raw_config.get("scan_interval", 10), "scan_interval")
+    if scan_interval <= 0:
+        raise ConfigError("scan_interval must be greater than 0")
+
     normalized = {
         "monitor": monitor,
         "also_route": also_route,
@@ -186,16 +243,22 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         # Keep legacy key to avoid breaking existing consumers/tests.
         "paketloss_threshold": packet_loss_threshold,
         "test_count": test_count,
-        "test_interval": _as_float(raw_config.get("test_interval", 0.5), "test_interval"),
-        "payload_size": _as_int(raw_config.get("payload_size", 56), "payload_size"),
-        "scan_interval": _as_float(raw_config.get("scan_interval", 10), "scan_interval"),
+        "test_interval": test_interval,
+        "payload_size": payload_size,
+        "scan_interval": scan_interval,
         "delete_preadded_routes": bool(raw_config.get("delete_preadded_routes", False)),
-        "ip_bin": _as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"),
+        "ip_bin": _validate_ip_bin(_as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"), "ip_bin"),
+        "ip_timeout": _as_float(raw_config.get("ip_timeout", 10), "ip_timeout"),
         "admin_socket_path": _as_non_empty_string(
             raw_config.get("admin_socket_path", DEFAULT_ADMIN_SOCKET_PATH), "admin_socket_path"
         ),
+        "systemd_logging": bool(raw_config.get("systemd_logging", False)),
         "debug": bool(raw_config.get("debug", False)),
     }
+
+    if normalized["ip_timeout"] <= 0:
+        raise ConfigError("ip_timeout must be greater than 0")
+
     return normalized
 
 
@@ -216,6 +279,9 @@ class LowestLatencyRoutesOptimizer:
         if self._state_lock is None:
             self._state_lock = asyncio.Lock()
         return self._state_lock
+
+    def _destinations_for_host(self, host: str) -> List[str]:
+        return [host] + self.config.get("also_route", {}).get(host, [])
 
     def run(self):
         """
@@ -384,7 +450,11 @@ class LowestLatencyRoutesOptimizer:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
+                timeout=self.config.get("ip_timeout", 10),
             )
+        except subprocess.TimeoutExpired as exc:
+            logging.error("ip command timed out after %ss: %s", self.config.get("ip_timeout", 10), exc)
+            return False, "timeout"
         except Exception as exc:
             logging.exception(exc)
             return False, str(exc)
@@ -414,9 +484,7 @@ class LowestLatencyRoutesOptimizer:
         """
         hosts = set()
         for host in self.config["monitor"]:
-            hosts.add(host)
-            if host in self.config.get("also_route", {}):
-                hosts.update(self.config["also_route"][host])
+            hosts.update(self._destinations_for_host(host))
 
         for host in hosts:
             self.clear_route(host)
@@ -478,7 +546,7 @@ class LowestLatencyRoutesOptimizer:
             logging.error("Unknown route '%s' for host '%s'", route_name, host)
             return
 
-        hosts_to_add = [host] + self.config.get("also_route", {}).get(host, [])
+        hosts_to_add = self._destinations_for_host(host)
 
         logging.info("Apply %s => %s", host, route_name)
         for destination in hosts_to_add:
@@ -497,6 +565,199 @@ class LowestLatencyRoutesOptimizer:
                 continue
             self.current_routes[destination] = route_name
 
+    async def _execute_probes(self) -> Tuple[List[Any], List[str]]:
+        tasks = []
+        route_names = []
+        for route in self.routes:
+            tasks.append(
+                asyncio.create_task(
+                    async_multiping(
+                        self.config["monitor"],
+                        count=self.config["test_count"],
+                        source=route["probe_source"],
+                        interval=self.config["test_interval"],
+                        payload_size=self.config["payload_size"],
+                    )
+                )
+            )
+            route_names.append(route["name"])
+        result = await asyncio.gather(*tasks, return_exceptions=True)
+        return result, route_names
+
+    @staticmethod
+    def _aggregate_probe_results(
+        result: List[Any], route_names: List[str]
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, Any]]], Set[str], Dict[str, Dict[str, Dict[str, float]]]]:
+        probe_snapshot: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        sources_up: Set[str] = set()
+        new_sums: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for x, hosts in enumerate(result):
+            source = route_names[x]
+            if isinstance(hosts, BaseException):
+                logging.warning("%s: probe failed: %s", source, hosts)
+                continue
+            if not isinstance(hosts, list):
+                logging.warning("%s: probe returned unexpected payload type: %s", source, type(hosts).__name__)
+                continue
+            for host in hosts:
+                if host.address not in probe_snapshot:
+                    probe_snapshot[host.address] = {}
+                probe_snapshot[host.address][source] = {
+                    "avg_rtt": host.avg_rtt,
+                    "avg_loss": host.packet_loss,
+                    "is_alive": bool(host.is_alive),
+                }
+                if not host.is_alive:
+                    continue
+                sources_up.add(source)
+                if host.address not in new_sums:
+                    new_sums[host.address] = {}
+                if source not in new_sums[host.address]:
+                    new_sums[host.address][source] = {"rtt": 0.0, "loss": 0.0}
+                new_sums[host.address][source]["rtt"] += host.avg_rtt
+                new_sums[host.address][source]["loss"] += host.packet_loss
+        return probe_snapshot, sources_up, new_sums
+
+    @staticmethod
+    def _merge_sums(
+        existing: Dict[str, Dict[str, Dict[str, float]]],
+        new: Dict[str, Dict[str, Dict[str, float]]],
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        merged: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for host, sources in existing.items():
+            merged[host] = {src: {"rtt": data["rtt"], "loss": data["loss"]} for src, data in sources.items()}
+        for host, sources in new.items():
+            if host not in merged:
+                merged[host] = {}
+            for src, metrics in sources.items():
+                if src not in merged[host]:
+                    merged[host][src] = {"rtt": 0.0, "loss": 0.0}
+                merged[host][src]["rtt"] += metrics["rtt"]
+                merged[host][src]["loss"] += metrics["loss"]
+        return merged
+
+    def _should_force_reset(self, sources_up: Set[str]) -> bool:
+        for _host, current in self.current_routes.items():
+            if current not in sources_up:
+                return True
+        return False
+
+    @staticmethod
+    def _resolve_route_action(
+        host: str,
+        best_route: Tuple[str, float, float],
+        current_route: Optional[str],
+        mode: str,
+        switching_enabled: bool,
+        override_route: Optional[str],
+        host_results: Dict[str, Dict[str, float]],
+        checks: int,
+        packet_loss_threshold: float,
+        rtt_threshold: float,
+    ) -> Tuple[str, Optional[str]]:
+        if mode == "override" and override_route:
+            if current_route != override_route:
+                return "apply", override_route
+            return "keep", None
+
+        if mode == "frozen" or not switching_enabled:
+            return "keep", None
+
+        if current_route is None or current_route not in host_results:
+            return "apply", best_route[0]
+
+        if current_route == best_route[0]:
+            logging.debug("%s: Current route is already the fastest route", host)
+            return "keep", None
+
+        current_loss = host_results[current_route]["loss"] / checks
+        current_rtt = host_results[current_route]["rtt"] / checks
+        if current_loss > packet_loss_threshold:
+            logging.warning("%s: Current route has paketloss, need to switch", host)
+            return "apply", best_route[0]
+
+        rtt_diff = current_rtt - best_route[1]
+        logging.debug(
+            "%s: rtt_diff: %s, (%s) %s (%s) %s ",
+            host,
+            rtt_diff,
+            current_route,
+            current_rtt,
+            best_route[0],
+            best_route[1],
+        )
+
+        if rtt_diff < rtt_threshold:
+            logging.info(
+                "%s: Route not changed to %s, rtt difference %s < threshold %s",
+                host,
+                best_route[0],
+                round(rtt_diff, 3),
+                rtt_threshold,
+            )
+            return "keep", None
+
+        return "apply", best_route[0]
+
+    async def _apply_routes_for_cycle(self, sums: Dict[str, Dict[str, Dict[str, float]]], checks: int) -> List[str]:
+        valid_source_found: List[str] = []
+        for host, results in sums.items():
+            candidates: List[Tuple[str, float, float]] = []
+            for source, metrics in results.items():
+                avg_rtt = metrics["rtt"] / checks
+                avg_loss = metrics["loss"] / checks
+                candidates.append((source, avg_rtt, avg_loss))
+                logging.debug("%s: %s: %s %s", host, source, avg_rtt, avg_loss)
+
+            best_route = sorted(candidates, key=lambda y: (y[2], y[1]))[0]
+            current_route = self.current_routes.get(host)
+
+            async with self._get_state_lock():
+                mode = self.route_modes.get(host, "auto")
+                switching_enabled = bool(self.switching_enabled.get(host, True))
+                override_route = self.override_routes.get(host)
+
+            action, target_route = self._resolve_route_action(
+                host,
+                best_route,
+                current_route,
+                mode,
+                switching_enabled,
+                override_route,
+                results,
+                checks,
+                self.config["packet_loss_threshold"],
+                self.config["rtt_threshold"],
+            )
+
+            if action == "apply" and target_route:
+                self.apply_route_config(host, target_route)
+
+            valid_source_found.append(host)
+        return valid_source_found
+
+    def _handle_fallbacks(self, valid_source_found: List[str]) -> None:
+        for sip in self.config["monitor"]:
+            if sip in valid_source_found:
+                continue
+            logging.warning("No valid source found for %s", sip)
+            fallback = self.config.get("fallback_routes", {}).get(sip)
+            if fallback:
+                self.apply_route_config(sip, fallback)
+            else:
+                logging.warning("No fallback routes configured for %s", sip)
+                for destination in self._destinations_for_host(sip):
+                    self.clear_route(destination)
+
+    async def _wait_interval(self, stop_event: Optional[asyncio.Event]) -> None:
+        if stop_event is None:
+            await asyncio.sleep(self.config["scan_interval"])
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=self.config["scan_interval"])
+        except asyncio.TimeoutError:
+            pass
+
     async def run_async(self, stop_event: Optional[asyncio.Event] = None):
         """
         Runs the main loop of the optimizer.
@@ -510,175 +771,25 @@ class LowestLatencyRoutesOptimizer:
             None
         """
         checks = 0
-        sums = {}  # host -> route_name -> {"rtt": sum, "loss": sum}
+        sums: Dict[str, Dict[str, Dict[str, float]]] = {}
         while not (stop_event is not None and stop_event.is_set()):
-            # send ICMP requests
-            tasks = []
-            route_names = []
-            for route in self.routes:
-                tasks.append(
-                    asyncio.create_task(
-                        async_multiping(
-                            self.config["monitor"],
-                            count=self.config["test_count"],
-                            source=route["probe_source"],
-                            interval=self.config["test_interval"],
-                            payload_size=self.config["payload_size"],
-                        )
-                    )
-                )
-                route_names.append(route["name"])
-
-            # wait and aggregate results
-            result = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # process results
-            host_data = {}
-            sources_up = set()  # route names with successful probes
-            probe_snapshot = {}
-            for x, hosts in enumerate(result):
-                source = route_names[x]
-                if isinstance(hosts, BaseException):
-                    logging.warning("%s: probe failed: %s", source, hosts)
-                    continue
-                if not isinstance(hosts, list):
-                    logging.warning("%s: probe returned unexpected payload type: %s", source, type(hosts).__name__)
-                    continue
-                for host in hosts:
-                    if host.address not in probe_snapshot:
-                        probe_snapshot[host.address] = {}
-                    probe_snapshot[host.address][source] = {
-                        "avg_rtt": host.avg_rtt,
-                        "avg_loss": host.packet_loss,
-                        "is_alive": bool(host.is_alive),
-                    }
-
-                    if not host.is_alive:
-                        continue
-
-                    sources_up.add(source)
-
-                    if host.address not in sums:
-                        sums[host.address] = {}
-
-                    if source not in sums[host.address]:
-                        sums[host.address][source] = {"rtt": 0, "loss": 0}
-
-                    if host.address not in host_data:
-                        host_data[host.address] = []
-
-                    sums[host.address][source]["rtt"] += host.avg_rtt
-                    sums[host.address][source]["loss"] += host.packet_loss
-
-                    host_data[host.address].append((source, host.avg_rtt, host.packet_loss))
+            result, route_names = await self._execute_probes()
+            probe_snapshot, sources_up, new_sums = self._aggregate_probe_results(result, route_names)
 
             async with self._get_state_lock():
                 self.last_probe_snapshot = probe_snapshot
 
-            # sort by newest
-            force_reset = False
-            for host, results in host_data.items():
-                if host in self.current_routes and self.current_routes[host] not in sources_up:
-                    force_reset = True
-                host_data[host] = sorted(results, key=lambda y: (y[2], y[1]))
-                logging.debug("%s: %s", host, host_data[host])
-
-            # apply routes
+            force_reset = self._should_force_reset(sources_up)
+            sums = self._merge_sums(sums, new_sums)
             checks += 1
-            valid_source_found = []
+
             if checks >= self.config["test_count"] or force_reset or not self.current_routes:
-                for host, results in sums.items():
-                    host_data = []
-                    for source, metrics in results.items():
-                        avg_rtt = metrics["rtt"] / checks
-                        avg_loss = metrics["loss"] / checks
-                        host_data.append((source, avg_rtt, avg_loss))
-                        logging.debug("%s: %s: %s %s", host, source, avg_rtt, avg_loss)
-
-                    host_data = sorted(host_data, key=lambda y: (y[2], y[1]))[0]
-                    current_route = self.current_routes.get(host)
-                    async with self._get_state_lock():
-                        mode = self.route_modes.get(host, "auto")
-                        switching_enabled = bool(self.switching_enabled.get(host, True))
-                        override_route = self.override_routes.get(host)
-
-                    if mode == "override" and override_route:
-                        valid_source_found.append(host)
-                        if current_route != override_route:
-                            self.apply_route_config(host, override_route)
-                        continue
-
-                    if mode == "frozen" or not switching_enabled:
-                        valid_source_found.append(host)
-                        continue
-
-                    # no routing set
-                    if current_route is None or current_route not in results:
-                        valid_source_found.append(host)
-                        self.apply_route_config(host, host_data[0])
-                        continue
-
-                    # no change
-                    if current_route == host_data[0]:
-                        valid_source_found.append(host)
-                        logging.debug("%s: Current route is already the fastest route", host)
-                        continue
-
-                    # paketloss
-                    current_loss = results[current_route]["loss"] / checks
-                    current_rtt = results[current_route]["rtt"] / checks
-                    if current_loss > self.config["packet_loss_threshold"]:
-                        logging.warning("%s: Current route has paketloss, need to switch", host)
-                    else:
-                        # check rtt difference between current and fastest route
-                        rtt_diff = current_rtt - host_data[1]
-                        logging.debug(
-                            "%s: rtt_diff: %s, (%s) %s (%s) %s ",
-                            host,
-                            rtt_diff,
-                            current_route,
-                            current_rtt,
-                            host_data[0],
-                            host_data[1],
-                        )
-
-                        if rtt_diff < self.config["rtt_threshold"]:
-                            valid_source_found.append(host)
-                            logging.info(
-                                "%s: Route not changed to %s, rtt difference %s < threshold %s",
-                                host,
-                                host_data[0],
-                                round(rtt_diff, 3),
-                                self.config["rtt_threshold"],
-                            )
-                            continue
-
-                    valid_source_found.append(host)
-                    self.apply_route_config(host, host_data[0])
-
+                valid_source_found = await self._apply_routes_for_cycle(sums, checks)
+                self._handle_fallbacks(valid_source_found)
                 checks = 0
                 sums = {}
 
-                for sip in self.config["monitor"]:
-                    if sip in valid_source_found:
-                        continue
-                    logging.warning("No valid source found for %s", sip)
-
-                    # fallback routes
-                    if self.config.get("fallback_routes", {}).get(sip):
-                        self.apply_route_config(sip, self.config.get("fallback_routes", {}).get(sip))
-                    else:
-                        logging.warning("No fallback routes configured for %s", sip)
-                        self.clear_route(sip)
-
-            if stop_event is None:
-                await asyncio.sleep(self.config["scan_interval"])
-                continue
-
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self.config["scan_interval"])
-            except asyncio.TimeoutError:
-                pass
+            await self._wait_interval(stop_event)
 
 
 def main() -> None:
@@ -688,6 +799,12 @@ def main() -> None:
     )
 
     parser.add_argument("--config", type=str, help="Path to config file", required=True)
+    parser.add_argument(
+        "--systemd-logging",
+        action="store_true",
+        dest="systemd_logging",
+        help="omit timestamp from log output (useful when running under systemd)",
+    )
 
     args = parser.parse_args()
 
@@ -712,6 +829,12 @@ def main() -> None:
         logging.error("Invalid configuration: %s", exc)
         sys.exit(1)
 
+    if llro_instance.config.get("systemd_logging") or args.systemd_logging:
+        logging.basicConfig(
+            level=logging.DEBUG if llro_instance.config.get("debug") else logging.INFO,
+            format="%(levelname)-8s %(message)s",
+            force=True,
+        )
     if llro_instance.config.get("debug"):
         logging.getLogger("root").setLevel(logging.DEBUG)
 
