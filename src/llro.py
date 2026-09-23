@@ -971,15 +971,10 @@ def main() -> None:
         sys.exit(1)
 
     if llro_instance.config.get("systemd_logging") or args.systemd_logging:
-        # logging.basicConfig(force=True) requires Python 3.8+; remove the
-        # handlers installed at import time manually for Python 3.7 support.
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
-            handler.close()
         logging.basicConfig(
             level=logging.DEBUG if llro_instance.config.get("debug") else logging.INFO,
             format="%(levelname)-8s %(message)s",
+            force=True,
         )
     if llro_instance.config.get("debug"):
         logging.getLogger("root").setLevel(logging.DEBUG)

@@ -7,20 +7,21 @@ name = "llro"
 version = "1.0.1"
 description = "Service to get lowest latency route to targets and set static routes."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "LLRO contributors" }]
 keywords = ["network", "routing", "latency", "icmp"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Operating System :: POSIX :: Linux",
   "Topic :: System :: Networking",
 ]
 dependencies = [
   "icmplib==3.0.4",
-  "PyYAML==6.0.1; python_version < '3.8'",
-  "PyYAML==6.0.3; python_version >= '3.8'",
+  "PyYAML==6.0.3",
 ]
 
 [project.urls]
@@ -40,23 +41,24 @@ py-modules = ["llro", "llro_cli"]
 
 [dependency-groups]
 dev = [
-  "build>=1.2.2; python_version >= '3.8'",
-  "pyright>=1.1.408; python_version >= '3.8'",
-  "pytest>=7.4,<8; python_version < '3.8'",
-  "pytest>=8.3; python_version >= '3.8'",
-  "pytest-cov>=4.1,<5; python_version < '3.8'",
-  "pytest-cov>=5; python_version >= '3.8'",
-  "ruff>=0.12.0",
-  "ruff>=0.12.0; python_version >= '3.8'",
-  "twine>=6.2.0; python_version >= '3.10'",
-  "vulture>=2.14; python_version >= '3.8'",
-  "xenon>=0.9.3; python_version >= '3.10'",
-  "vulture>=2.9.1",
+  "bandit>=1.9",
+  "build>=1.2.2",
+  "mutmut>=3.8",
+  "pre-commit>=4.0",
   "pyright>=1.1.408",
+  "pytest>=8.3",
+  "pytest-cov>=5",
+  "pytest-timeout>=2.3",
+  "radon>=6.0",
+  "ruff>=0.12.0",
+  "twine>=6.2.0",
+  "vulture>=2.14",
+  "xenon>=0.9.3",
 ]
 
 [tool.ruff]
-exclude = ["dist", "build", ".venv"]
+exclude = ["dist", "build", ".venv", "mutants"]
+target-version = "py311"
 line-length = 120
 indent-width = 4
 
@@ -72,6 +74,7 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 addopts = [
   "-q",
+  "--strict-markers",
   "--cov=llro",
   "--cov-report=term-missing",
 ]
@@ -80,8 +83,11 @@ markers = [
   "integration: real integration tests that require external services/tools",
 ]
 
+[tool.coverage.report]
+fail_under = 80
+
 [tool.pyright]
-pythonVersion = "3.7"
+pythonVersion = "3.11"
 include = ["src", "tests"]
 exclude = ["**/__pycache__", "**/node_modules", "**/dist", "**/build", "**/.venv"]
 
@@ -90,3 +96,23 @@ exclude = ["dist", "build", "venv", ".venv", "tests"]
 min_confidence = 80
 paths = ["src"]
 sort_by_size = true
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests", "dist", "build"]
+# B404/B603: subprocess is the core feature — llro drives `ip route` and
+# `ping` via fixed argv lists (no shell), which bandit flags by design.
+skips = ["B404", "B603"]
+
+[tool.mutmut]
+source_paths = ["src/llro.py", "src/llro_cli.py"]
+pytest_add_cli_args_test_selection = ["tests/", "-m", "not integration", "--no-cov"]
+mutate_only_covered_lines = true
+# Lines whose mutations can never change behaviour:
+#  - help=/description=/formatter_class: argparse metadata text
+#  - logging.* calls: observability only
+do_not_mutate_patterns = [
+    'help=',
+    'description=',
+    'formatter_class',
+    '^\s*logging\.',
+]

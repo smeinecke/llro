@@ -1,11 +1,28 @@
+import json
 import os
+import re
+import shutil
 import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, Iterator, NamedTuple, Optional
 
 import pytest
+
+COMPOSE_FILE = Path(__file__).resolve().parent / "integration" / "docker-compose.yml"
+ADMIN_SOCKET_PATH = "/run/llro/admin.sock"
+ROUTE_TIMEOUT_SECONDS = 45
+SWITCH_TIMEOUT_SECONDS = 90
+
+# NOTE: the tests in this module share one docker-compose testbed (module-scoped
+# fixture) and intentionally run in file order — fault injection is cumulative.
+pytestmark = pytest.mark.integration
+
+
+class ComposeTestbed(NamedTuple):
+    project: str
+    env: Dict[str, str]
 
 
 def _run(cmd, env=None):  # type: ignore[no-untyped-def]
@@ -19,66 +36,21 @@ def _run(cmd, env=None):  # type: ignore[no-untyped-def]
     )
 
 
-def _wait_for_route(
-    compose_file: Path,
-    project_name: str,
-    monitor_ip: str,
-    expected_gateway: str,
-    timeout_seconds: int,
-    env: Dict[str, str],
-) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        out = _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "-p",
-                project_name,
-                "exec",
-                "-T",
-                "llro",
-                "ip",
-                "route",
-                "show",
-                "%s/32" % monitor_ip,
-            ],
-            env=env,
-        )
-        if out.returncode == 0 and ("via %s" % expected_gateway) in out.stdout:
-            return True
-        time.sleep(1)
-    return False
-
-
-def _ping_from_source(
-    compose_file: Path, project_name: str, source_ip: str, target_ip: str, env: Dict[str, str]
-) -> bool:
-    ping = _run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(compose_file),
-            "-p",
-            project_name,
-            "exec",
-            "-T",
-            "llro",
-            "ping",
-            "-c",
-            "1",
-            "-W",
-            "1",
-            "-I",
-            source_ip,
-            target_ip,
-        ],
-        env=env,
+def _compose(testbed: ComposeTestbed, *args: str):
+    return _run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "-p", testbed.project, *args],
+        env=testbed.env,
     )
-    return ping.returncode == 0
+
+
+def _exec(testbed: ComposeTestbed, service: str, *cmd: str):
+    return _compose(testbed, "exec", "-T", service, *cmd)
+
+
+def _docker_compose_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    return _run(["docker", "compose", "version"]).returncode == 0
 
 
 def _build_network_env(project_name: str) -> Dict[str, str]:
@@ -102,165 +74,233 @@ def _build_network_env(project_name: str) -> Dict[str, str]:
     }
 
 
-@pytest.mark.integration
-def test_route_switchover_when_icmp_blocked_on_one_path() -> None:
-    if os.environ.get("RUN_DOCKER_INTEGRATION") != "1":
-        pytest.skip("Set RUN_DOCKER_INTEGRATION=1 to run Docker integration tests.")
-
-    compose_file = Path(__file__).resolve().parent / "integration" / "docker-compose.yml"
-    base_env = os.environ.copy()
-    docker_check = _run(["docker", "compose", "version"], env=base_env)
-    if docker_check.returncode != 0:
+@pytest.fixture(scope="module")
+def testbed() -> Iterator[ComposeTestbed]:
+    """Bring up the compose testbed once for all tests in this module."""
+    if not _docker_compose_available():
         pytest.skip("docker compose is not available.")
 
-    project_name = ""
-    compose_env = {}
-    up = None
+    testbed = None
     for _ in range(8):
-        project_name = "llroint%s" % uuid.uuid4().hex[:8]
-        compose_env = base_env.copy()
-        compose_env.update(_build_network_env(project_name))
-        up = _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "-p",
-                project_name,
-                "up",
-                "--build",
-                "-d",
-            ],
-            env=compose_env,
+        candidate = ComposeTestbed(
+            project="llroint%s" % uuid.uuid4().hex[:8],
+            env={},
         )
+        env = os.environ.copy()
+        env.update(_build_network_env(candidate.project))
+        testbed = ComposeTestbed(project=candidate.project, env=env)
+        up = _compose(testbed, "up", "--build", "-d")
         if up.returncode == 0:
             break
         if "Pool overlaps with other one on this address space" in up.stderr:
             continue
         pytest.fail("compose up failed:\nSTDOUT:\n%s\nSTDERR:\n%s" % (up.stdout, up.stderr))
-
-    if up is None or up.returncode != 0:
+    else:
         pytest.fail("compose up failed repeatedly due network overlap; please clean stale Docker networks")
 
     try:
-        stable_on_a = _wait_for_route(
-            compose_file,
-            project_name,
-            compose_env["MONITOR_IP"],
-            compose_env["WAN_A_GATEWAY_IP"],
-            45,
-            compose_env,
-        )
-        assert stable_on_a, "LLRO did not establish the expected initial route via wan_a"
-        assert _ping_from_source(
-            compose_file,
-            project_name,
-            compose_env["WAN_A_SOURCE_IP"],
-            compose_env["MONITOR_IP"],
-            compose_env,
-        ), "wan_a source cannot reach monitor before fault injection"
-        assert _ping_from_source(
-            compose_file,
-            project_name,
-            compose_env["WAN_B_SOURCE_IP"],
-            compose_env["MONITOR_IP"],
-            compose_env,
-        ), "wan_b source cannot reach monitor before fault injection"
-
-        drop_icmp = _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "-p",
-                project_name,
-                "exec",
-                "-T",
-                "target",
-                "iptables",
-                "-I",
-                "INPUT",
-                "-p",
-                "icmp",
-                "-s",
-                compose_env["WAN_A_SOURCE_IP"],
-                "-d",
-                compose_env["MONITOR_IP"],
-                "-j",
-                "DROP",
-            ],
-            env=compose_env,
-        )
-        assert drop_icmp.returncode == 0, "failed to apply target ICMP drop rule:\n%s" % drop_icmp.stderr
-        drop_icmp_reply = _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "-p",
-                project_name,
-                "exec",
-                "-T",
-                "target",
-                "iptables",
-                "-I",
-                "OUTPUT",
-                "-p",
-                "icmp",
-                "-s",
-                compose_env["MONITOR_IP"],
-                "-d",
-                compose_env["WAN_A_SOURCE_IP"],
-                "-j",
-                "DROP",
-            ],
-            env=compose_env,
-        )
-        assert drop_icmp_reply.returncode == 0, (
-            "failed to apply target ICMP reply drop rule:\n%s" % drop_icmp_reply.stderr
-        )
-
-        confirm_drop = _ping_from_source(
-            compose_file,
-            project_name,
-            compose_env["WAN_A_SOURCE_IP"],
-            compose_env["MONITOR_IP"],
-            compose_env,
-        )
-        assert not confirm_drop, "wan_a source still reaches monitor after target ICMP drop"
-        confirm_wan_b_alive = _ping_from_source(
-            compose_file,
-            project_name,
-            compose_env["WAN_B_SOURCE_IP"],
-            compose_env["MONITOR_IP"],
-            compose_env,
-        )
-        assert confirm_wan_b_alive, "wan_b source became unreachable after target ICMP drop for wan_a"
-
-        switched_to_b = _wait_for_route(
-            compose_file,
-            project_name,
-            compose_env["MONITOR_IP"],
-            compose_env["WAN_B_GATEWAY_IP"],
-            60,
-            compose_env,
-        )
-        assert switched_to_b, "LLRO did not switch route to wan_b after ICMP was blocked on wan_a path"
+        yield testbed
     finally:
-        _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(compose_file),
-                "-p",
-                project_name,
-                "down",
-                "-v",
-                "--remove-orphans",
-            ],
-            env=compose_env,
+        _compose(testbed, "down", "-v", "--remove-orphans")
+
+
+@pytest.fixture(autouse=True)
+def _reset_modes(testbed: ComposeTestbed) -> Iterator[None]:
+    """Best-effort return to auto mode after each test so a failure does not cascade."""
+    yield
+    try:
+        _cli(testbed, "reset-auto", "--all")
+    except Exception:
+        pass
+
+
+def _route_gateway(testbed: ComposeTestbed, monitor_ip: str) -> Optional[str]:
+    """Return the gateway of the host route for monitor_ip, or None if absent."""
+    out = _exec(testbed, "llro", "ip", "route", "show", "%s/32" % monitor_ip)
+    if out.returncode != 0:
+        return None
+    match = re.search(r"\bvia\s+(\S+)", out.stdout)
+    return match.group(1) if match else None
+
+
+def _wait_for_gateway(testbed: ComposeTestbed, monitor_ip: str, expected_gateway: str, timeout_seconds: int) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if _route_gateway(testbed, monitor_ip) == expected_gateway:
+            return True
+        time.sleep(1)
+    return False
+
+
+def _wait_for_any_route(testbed: ComposeTestbed, monitor_ip: str, timeout_seconds: int) -> Optional[str]:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        gateway = _route_gateway(testbed, monitor_ip)
+        if gateway is not None:
+            return gateway
+        time.sleep(1)
+    return None
+
+
+def _ping_from_source(testbed: ComposeTestbed, source_ip: str, target_ip: str) -> bool:
+    ping = _exec(testbed, "llro", "ping", "-c", "1", "-W", "1", "-I", source_ip, target_ip)
+    return ping.returncode == 0
+
+
+def _drop_icmp(testbed: ComposeTestbed, source_ip: str, monitor_ip: str) -> None:
+    """Drop ICMP echo requests and replies between source_ip and the monitor on the target."""
+    for chain, src, dst in (
+        ("INPUT", source_ip, monitor_ip),
+        ("OUTPUT", monitor_ip, source_ip),
+    ):
+        result = _exec(
+            testbed,
+            "target",
+            "iptables",
+            "-I",
+            chain,
+            "-p",
+            "icmp",
+            "-s",
+            src,
+            "-d",
+            dst,
+            "-j",
+            "DROP",
         )
+        assert result.returncode == 0, "failed to apply target ICMP drop rule (%s):\n%s" % (chain, result.stderr)
+
+
+def _cli(testbed: ComposeTestbed, *args: str) -> Dict[str, Any]:
+    """Run llro-cli inside the daemon container and return the parsed JSON payload."""
+    out = _exec(testbed, "llro", "llro-cli", "--socket", ADMIN_SOCKET_PATH, *args)
+    assert out.returncode == 0, "llro-cli %s failed:\n%s" % (" ".join(args), out.stderr)
+    return json.loads(out.stdout)
+
+
+def _cli_status(testbed: ComposeTestbed, monitor_ip: str) -> Dict[str, Any]:
+    status = _cli(testbed, "status", "--json")
+    hosts = status.get("hosts") or []
+    for host in hosts:
+        if host.get("host") == monitor_ip:
+            return host
+    pytest.fail("monitor host %s missing from status output: %s" % (monitor_ip, status))
+
+
+def _wait_for_all_routes_dead(testbed: ComposeTestbed, monitor_ip: str, timeout_seconds: int) -> bool:
+    """Wait until the daemon's status reports every route for monitor_ip as dead."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            host = _cli_status(testbed, monitor_ip)
+        except (AssertionError, json.JSONDecodeError):
+            time.sleep(1)
+            continue
+        routes = host.get("routes") or {}
+        if routes and all(not route.get("is_alive") for route in routes.values()):
+            return True
+        time.sleep(1)
+    return False
+
+
+def test_admin_socket_status_and_controls(testbed: ComposeTestbed) -> None:
+    monitor_ip = testbed.env["MONITOR_IP"]
+    wan_gateways = {testbed.env["WAN_A_GATEWAY_IP"], testbed.env["WAN_B_GATEWAY_IP"]}
+
+    initial_gateway = _wait_for_any_route(testbed, monitor_ip, ROUTE_TIMEOUT_SECONDS)
+    assert initial_gateway in wan_gateways, "LLRO did not establish an initial route, got: %s" % initial_gateway
+
+    assert _ping_from_source(testbed, testbed.env["WAN_A_SOURCE_IP"], monitor_ip), (
+        "wan_a source cannot reach monitor before fault injection"
+    )
+    assert _ping_from_source(testbed, testbed.env["WAN_B_SOURCE_IP"], monitor_ip), (
+        "wan_b source cannot reach monitor before fault injection"
+    )
+
+    host = _cli_status(testbed, monitor_ip)
+    assert host["mode"] == "auto"
+    assert host["switching_enabled"] is True
+    assert host["routes"], "status reports no probe data"
+
+    # Pin the route to wan_b; the daemon applies it immediately.
+    response = _cli(testbed, "override", "--host", monitor_ip, "--route", "wan_b")
+    assert response["mode"] == "override"
+    assert response["route_applied"] is True
+    assert _wait_for_gateway(testbed, monitor_ip, testbed.env["WAN_B_GATEWAY_IP"], ROUTE_TIMEOUT_SECONDS), (
+        "override did not move the route to wan_b"
+    )
+
+    host = _cli_status(testbed, monitor_ip)
+    assert host["mode"] == "override"
+    assert host["override_route"] == "wan_b"
+
+    # Back to auto before freezing: disable-switching keeps mode "override"
+    # on pinned hosts (override takes precedence), so exercise "frozen" in
+    # auto mode.
+    response = _cli(testbed, "reset-auto", "--host", monitor_ip)
+    assert response["mode"] == "auto"
+    host = _cli_status(testbed, monitor_ip)
+    assert host["mode"] == "auto"
+    assert host["override_route"] is None
+
+    # Freeze switching, then return to auto mode.
+    response = _cli(testbed, "disable-switching", "--host", monitor_ip)
+    assert response["mode"] == "frozen"
+    host = _cli_status(testbed, monitor_ip)
+    assert host["mode"] == "frozen"
+    assert host["switching_enabled"] is False
+
+    response = _cli(testbed, "reset-auto", "--host", monitor_ip)
+    assert response["mode"] == "auto"
+    host = _cli_status(testbed, monitor_ip)
+    assert host["mode"] == "auto"
+    assert host["switching_enabled"] is True
+
+
+def test_route_switchover_when_icmp_blocked_on_one_path(testbed: ComposeTestbed) -> None:
+    monitor_ip = testbed.env["MONITOR_IP"]
+    sources = {
+        testbed.env["WAN_A_GATEWAY_IP"]: testbed.env["WAN_A_SOURCE_IP"],
+        testbed.env["WAN_B_GATEWAY_IP"]: testbed.env["WAN_B_SOURCE_IP"],
+    }
+
+    current_gateway = _wait_for_any_route(testbed, monitor_ip, ROUTE_TIMEOUT_SECONDS)
+    assert current_gateway in sources, "no current route to break, got: %s" % current_gateway
+
+    # Block whichever path currently carries the route so a switch is forced.
+    blocked_source = sources[current_gateway]
+    other_gateway = next(gateway for gateway in sources if gateway != current_gateway)
+    other_source = sources[other_gateway]
+
+    _drop_icmp(testbed, blocked_source, monitor_ip)
+    assert not _ping_from_source(testbed, blocked_source, monitor_ip), (
+        "source still reaches monitor after target ICMP drop"
+    )
+    assert _ping_from_source(testbed, other_source, monitor_ip), (
+        "other source became unreachable after target ICMP drop"
+    )
+
+    assert _wait_for_gateway(testbed, monitor_ip, other_gateway, SWITCH_TIMEOUT_SECONDS), (
+        "LLRO did not switch route after ICMP was blocked on the active path"
+    )
+
+
+def test_fallback_route_when_all_paths_fail(testbed: ComposeTestbed) -> None:
+    monitor_ip = testbed.env["MONITOR_IP"]
+
+    # Block both paths (one may already be dropped by the previous test; a
+    # duplicate iptables rule is harmless). The compose config maps
+    # fallback_routes: <monitor_ip> -> wan_a.
+    _drop_icmp(testbed, testbed.env["WAN_A_SOURCE_IP"], monitor_ip)
+    _drop_icmp(testbed, testbed.env["WAN_B_SOURCE_IP"], monitor_ip)
+    assert not _ping_from_source(testbed, testbed.env["WAN_A_SOURCE_IP"], monitor_ip)
+    assert not _ping_from_source(testbed, testbed.env["WAN_B_SOURCE_IP"], monitor_ip)
+
+    # Wait until the daemon itself reports every route as dead — only then is
+    # the fallback responsible for the route that remains installed.
+    assert _wait_for_all_routes_dead(testbed, monitor_ip, SWITCH_TIMEOUT_SECONDS), (
+        "daemon never reported all routes dead"
+    )
+    assert _wait_for_gateway(testbed, monitor_ip, testbed.env["WAN_A_GATEWAY_IP"], SWITCH_TIMEOUT_SECONDS), (
+        "fallback route via wan_a was not installed after all probes failed"
+    )

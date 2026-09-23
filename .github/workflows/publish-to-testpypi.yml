@@ -15,24 +15,16 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-
-      - name: Sync dependencies
-        run: uv sync
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
 
       - name: Build package
-        run: make build
+        run: uv build
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions-testpypi
           path: dist/
@@ -46,10 +38,11 @@ jobs:
       url: https://test.pypi.org/p/llro
     permissions:
       id-token: write
+      contents: read
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-package-distributions-testpypi
           path: dist/

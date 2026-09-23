@@ -10,7 +10,7 @@ For a deeper technical walkthrough, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
 - Linux with `iproute2` (`ip` command available, default path `/usr/sbin/ip`)
 - Root privileges or equivalent capabilities (`CAP_NET_ADMIN` and raw ICMP capability)
-- Python `>=3.7`
+- Python `>=3.11`
 
 ## Development setup
 
@@ -110,10 +110,10 @@ Compatibility mode maps each `interfaces.<device>.<source>` entry to a generated
 ## Tooling (Make + uv)
 
 ```bash
-make validate   # format check + lint + typecheck + dead-code scan
-make test       # pytest
-make integration-test  # dockerized route mutation integration test
-make build      # build sdist/wheel + twine metadata check
+make validate          # format check + lint + typecheck + dead-code/complexity/security scans
+make test              # unit tests (pytest -m "not integration")
+make test-integration  # dockerized integration tests (needs a docker daemon)
+make build             # build sdist/wheel + twine metadata check
 ```
 
 Auto-fix formatting/lint issues:
@@ -125,10 +125,10 @@ make fix
 Run integration tests directly:
 
 ```bash
-RUN_DOCKER_INTEGRATION=1 uv run pytest -m integration
+uv run pytest tests/test_integration_compose.py -v -m integration
 ```
 
-The compose integration scenario spins up multiple containers, blocks ICMP on one path, and verifies LLRO switches the monitored host route to the remaining healthy path.
+The compose integration scenario spins up multiple containers and verifies the daemon end-to-end: admin socket controls (`status`/`override`/`disable-switching`/`reset-auto` via `llro-cli`), route switchover when ICMP is blocked on the active path, and `fallback_routes` when all paths fail.
 
 ## Install as CLI
 
@@ -249,8 +249,8 @@ sudo journalctl -u llro -n 50
 - `make publish-testpypi`
 - `make publish-pypi`
 - GitHub Actions publish:
-- Push tag `v*` to trigger `.github/workflows/publish-to-pypi.yml`
-- Workflow uses trusted publishing (`id-token`) for PyPI
+- Push tag `v*.*.*` to trigger `.github/workflows/release.yml`
+- Workflow verifies the tag matches the package version, attests build provenance, creates a GitHub release, and publishes to PyPI via trusted publishing (`id-token`)
 
 ## Contributing
 
