@@ -509,6 +509,7 @@ class LowestLatencyRoutesOptimizer:
         logging.info("Remove %s", host)
         ok, error_text = self._run_ip(["route", "del", "%s/32" % host])
         if ok or "RTNETLINK answers: No such process" in error_text:
+            self.current_routes.pop(host, None)
             return
         logging.error("Failed to remove route for %s: %s", host, error_text)
 
@@ -525,6 +526,27 @@ class LowestLatencyRoutesOptimizer:
         if route.get("probe_source"):
             cmd.extend(["src", route["probe_source"]])
         return cmd
+
+    def _route_exists(self, destination: str) -> bool:
+        cmd = [self.config["ip_bin"], "route", "show", "%s/32" % destination]
+        self._log_cmd(cmd)
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                timeout=self.config.get("ip_timeout", 10),
+            )
+        except Exception as exc:
+            logging.warning("Failed to check route for %s: %s", destination, exc)
+            return True
+        if completed.returncode != 0:
+            error_text = (completed.stderr or completed.stdout or "").strip()
+            logging.warning("Failed to check route for %s: %s", destination, error_text)
+            return True
+        return bool(completed.stdout.strip())
 
     def apply_route_config(self, host: str, route_name: str) -> None:
         """
@@ -732,6 +754,20 @@ class LowestLatencyRoutesOptimizer:
 
             if action == "apply" and target_route:
                 self.apply_route_config(host, target_route)
+            elif action == "keep" and current_route:
+                missing = [
+                    destination
+                    for destination in self._destinations_for_host(host)
+                    if not self._route_exists(destination)
+                ]
+                if missing:
+                    logging.warning(
+                        "%s: kernel route missing for %s, re-applying %s",
+                        host,
+                        ", ".join(missing),
+                        current_route,
+                    )
+                    self.apply_route_config(host, current_route)
 
             valid_source_found.append(host)
         return valid_source_found
