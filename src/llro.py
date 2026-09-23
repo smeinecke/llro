@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -29,16 +30,25 @@ class ConfigError(ValueError):
 
 
 def _as_float(value: Any, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise ConfigError("%s must be a number" % field_name)
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         raise ConfigError("%s must be a number" % field_name)
+    if not math.isfinite(result):
+        raise ConfigError("%s must be a finite number" % field_name)
+    return result
 
 
 def _as_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ConfigError("%s must be an integer" % field_name)
+    if isinstance(value, float) and not value.is_integer():
+        raise ConfigError("%s must be an integer" % field_name)
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ConfigError("%s must be an integer" % field_name)
 
 
@@ -48,15 +58,42 @@ def _as_non_empty_string(value: Any, field_name: str) -> str:
     return value.strip()
 
 
+def _as_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    raise ConfigError("%s must be a boolean" % field_name)
+
+
+def _host_route_target(address: str) -> str:
+    version = ipaddress.ip_address(address).version
+    return "%s/%d" % (address, 32 if version == 4 else 128)
+
+
 _DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
 def _validate_ip_address(value: str, field_name: str) -> str:
     try:
-        ipaddress.ip_address(value)
+        # Canonicalize so configured values always match the address form
+        # reported back by icmplib (e.g. compressed lowercase IPv6).
+        return str(ipaddress.ip_address(value))
     except ValueError:
         raise ConfigError("%s must be a valid IP address, got '%s'" % (field_name, value))
-    return value
+
+
+def _canonical_ip_or_value(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value
 
 
 def _validate_device_name(value: str, field_name: str) -> str:
@@ -65,9 +102,14 @@ def _validate_device_name(value: str, field_name: str) -> str:
     return value
 
 
-def _validate_ip_bin(value: str, field_name: str) -> str:
+def _validate_absolute_path(value: str, field_name: str) -> str:
     if not os.path.isabs(value):
         raise ConfigError("%s must be an absolute path, got '%s'" % (field_name, value))
+    return value
+
+
+def _validate_ip_bin(value: str, field_name: str) -> str:
+    _validate_absolute_path(value, field_name)
     if os.path.exists(value) and not os.access(value, os.X_OK):
         raise ConfigError("%s is not executable: '%s'" % (field_name, value))
     return value
@@ -77,23 +119,38 @@ def _normalize_monitor(config: Dict[str, Any]) -> List[str]:
     monitor = config.get("monitor")
     if not isinstance(monitor, list) or not monitor:
         raise ConfigError("Config does not contain a non-empty monitor list")
-    return [_validate_ip_address(_as_non_empty_string(item, "monitor entry"), "monitor entry") for item in monitor]
+    normalized = [
+        _validate_ip_address(_as_non_empty_string(item, "monitor entry"), "monitor entry") for item in monitor
+    ]
+    if len(set(normalized)) != len(normalized):
+        raise ConfigError("monitor contains duplicate entries")
+    return normalized
 
 
-def _normalize_also_route(config: Dict[str, Any]) -> Dict[str, List[str]]:
+def _normalize_also_route(config: Dict[str, Any], monitor: List[str]) -> Dict[str, List[str]]:
     raw_also_route = config.get("also_route", {})
     if not isinstance(raw_also_route, dict):
         raise ConfigError("also_route must be a mapping")
 
+    monitor_set = set(monitor)
+    seen_values = set()
     normalized = {}
     for host, mapped_hosts in raw_also_route.items():
         key = _validate_ip_address(_as_non_empty_string(host, "also_route key"), "also_route key")
+        if key not in monitor_set:
+            raise ConfigError("also_route key '%s' must exist in monitor" % key)
         if not isinstance(mapped_hosts, list):
             raise ConfigError("also_route values must be lists")
         normalized[key] = [
             _validate_ip_address(_as_non_empty_string(item, "also_route value"), "also_route value")
             for item in mapped_hosts
         ]
+        for value in normalized[key]:
+            if value in monitor_set:
+                raise ConfigError("also_route value '%s' must not be a monitored host" % value)
+            if value in seen_values:
+                raise ConfigError("also_route value '%s' is assigned to multiple hosts" % value)
+            seen_values.add(value)
     return normalized
 
 
@@ -171,13 +228,13 @@ def _normalize_fallback_routes(
     by_probe_source = {}
     by_gateway = {}
     for route in routes:
-        by_probe_source[route["probe_source"]] = route["name"]
+        by_probe_source.setdefault(route["probe_source"], []).append(route["name"])
         by_gateway.setdefault(route["gateway"], []).append(route["name"])
 
     monitor_set = set(monitor)
     normalized = {}
     for host, route_ref in raw_fallback_routes.items():
-        host_key = _as_non_empty_string(host, "fallback_routes key")
+        host_key = _validate_ip_address(_as_non_empty_string(host, "fallback_routes key"), "fallback_routes key")
         if host_key not in monitor_set:
             raise ConfigError("fallback_routes key '%s' must exist in monitor" % host_key)
         ref = _as_non_empty_string(route_ref, "fallback_routes[%s]" % host_key)
@@ -185,11 +242,12 @@ def _normalize_fallback_routes(
         if ref in route_names:
             normalized[host_key] = ref
             continue
-        if ref in by_probe_source:
-            normalized[host_key] = by_probe_source[ref]
+        ref_ip = _canonical_ip_or_value(ref)
+        if ref_ip in by_probe_source and len(by_probe_source[ref_ip]) == 1:
+            normalized[host_key] = by_probe_source[ref_ip][0]
             continue
-        if ref in by_gateway and len(by_gateway[ref]) == 1:
-            normalized[host_key] = by_gateway[ref][0]
+        if ref_ip in by_gateway and len(by_gateway[ref_ip]) == 1:
+            normalized[host_key] = by_gateway[ref_ip][0]
             continue
         raise ConfigError("fallback route '%s' for host '%s' does not match a configured route" % (ref, host_key))
     return normalized
@@ -200,7 +258,7 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         raise ConfigError("Config must be a mapping")
 
     monitor = _normalize_monitor(raw_config)
-    also_route = _normalize_also_route(raw_config)
+    also_route = _normalize_also_route(raw_config, monitor)
     routes = _normalize_routes(raw_config)
 
     route_names = set()
@@ -228,6 +286,8 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     payload_size = _as_int(raw_config.get("payload_size", 56), "payload_size")
     if payload_size <= 0:
         raise ConfigError("payload_size must be greater than 0")
+    if payload_size > 65507:
+        raise ConfigError("payload_size must not exceed 65507")
 
     scan_interval = _as_float(raw_config.get("scan_interval", 10), "scan_interval")
     if scan_interval <= 0:
@@ -246,16 +306,21 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         "test_interval": test_interval,
         "payload_size": payload_size,
         "scan_interval": scan_interval,
-        "delete_preadded_routes": bool(raw_config.get("delete_preadded_routes", False)),
+        "delete_preadded_routes": _as_bool(raw_config.get("delete_preadded_routes", False), "delete_preadded_routes"),
         "ip_bin": _validate_ip_bin(_as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"), "ip_bin"),
         "ip_timeout": _as_float(raw_config.get("ip_timeout", 10), "ip_timeout"),
-        "admin_socket_path": _as_non_empty_string(
-            raw_config.get("admin_socket_path", DEFAULT_ADMIN_SOCKET_PATH), "admin_socket_path"
+        "admin_socket_path": _validate_absolute_path(
+            _as_non_empty_string(raw_config.get("admin_socket_path", DEFAULT_ADMIN_SOCKET_PATH), "admin_socket_path"),
+            "admin_socket_path",
         ),
-        "systemd_logging": bool(raw_config.get("systemd_logging", False)),
-        "debug": bool(raw_config.get("debug", False)),
+        "systemd_logging": _as_bool(raw_config.get("systemd_logging", False), "systemd_logging"),
+        "debug": _as_bool(raw_config.get("debug", False), "debug"),
     }
 
+    if normalized["rtt_threshold"] < 0:
+        raise ConfigError("rtt_threshold must be greater than or equal to 0")
+    if not 0 <= normalized["packet_loss_threshold"] <= 100:
+        raise ConfigError("packet_loss_threshold must be between 0 and 100")
     if normalized["ip_timeout"] <= 0:
         raise ConfigError("ip_timeout must be greater than 0")
 
@@ -347,7 +412,7 @@ class LowestLatencyRoutesOptimizer:
     async def _handle_admin_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         response = {"ok": False, "error": "empty request"}
         try:
-            line = await reader.readline()
+            line = await asyncio.wait_for(reader.readline(), timeout=30)
             if line:
                 try:
                     request = json.loads(line.decode("utf-8"))
@@ -357,12 +422,18 @@ class LowestLatencyRoutesOptimizer:
                     response = await self._handle_admin_action(request)
         except Exception as exc:
             logging.exception("Admin request failed")
-            response = {"ok": False, "error": str(exc)}
+            response = {"ok": False, "error": str(exc) or type(exc).__name__}
 
-        writer.write((json.dumps(response) + "\n").encode("utf-8"))
-        await writer.drain()
+        try:
+            writer.write((json.dumps(response) + "\n").encode("utf-8"))
+            await writer.drain()
+        except OSError:
+            pass
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
 
     async def _build_status_data(self) -> Dict[str, Any]:
         async with self._get_state_lock():
@@ -393,6 +464,7 @@ class LowestLatencyRoutesOptimizer:
             route = request.get("route")
             if not isinstance(host, str) or not isinstance(route, str):
                 return {"ok": False, "error": "host and route must be strings"}
+            host = _canonical_ip_or_value(host)
             if host not in self.config["monitor"]:
                 return {"ok": False, "error": "unknown host '%s'" % host}
             if route not in self.routes_by_name:
@@ -401,8 +473,11 @@ class LowestLatencyRoutesOptimizer:
                 self.route_modes[host] = "override"
                 self.switching_enabled[host] = True
                 self.override_routes[host] = route
-            self.apply_route_config(host, route)
-            return {"ok": True, "data": {"host": host, "mode": "override", "route": route}}
+            applied = self.apply_route_config(host, route)
+            return {
+                "ok": True,
+                "data": {"host": host, "mode": "override", "route": route, "route_applied": applied},
+            }
 
         if action == "disable_switching":
             targets = self._resolve_targets(request)
@@ -433,8 +508,10 @@ class LowestLatencyRoutesOptimizer:
             return list(self.config["monitor"])
 
         host = request.get("host")
-        if isinstance(host, str) and host in self.config["monitor"]:
-            return [host]
+        if isinstance(host, str):
+            host = _canonical_ip_or_value(host)
+            if host in self.config["monitor"]:
+                return [host]
         return None
 
     def _log_cmd(self, cmd: List[str]) -> None:
@@ -474,7 +551,9 @@ class LowestLatencyRoutesOptimizer:
         """
         Clears the routes that are not needed.
 
-        Iterates over the source IP addresses specified in the configuration file and checks if they are present in the routes. If a route has a gateway IP that is not in the list of source IP addresses, it is removed. Additionally, if the destination IP of the route is in the list of IP addresses to monitor, it is also removed.
+        Removes the host routes for all monitored hosts (and their also_route
+        destinations), resets route tracking, then installs the configured
+        fallback routes.
 
         Parameters:
             None
@@ -507,7 +586,7 @@ class LowestLatencyRoutesOptimizer:
         """
 
         logging.info("Remove %s", host)
-        ok, error_text = self._run_ip(["route", "del", "%s/32" % host])
+        ok, error_text = self._run_ip(["route", "del", _host_route_target(host)])
         if ok or "RTNETLINK answers: No such process" in error_text:
             self.current_routes.pop(host, None)
             return
@@ -517,7 +596,7 @@ class LowestLatencyRoutesOptimizer:
         cmd = [
             "route",
             action,
-            "%s/32" % destination,
+            _host_route_target(destination),
             "via",
             route["gateway"],
             "dev",
@@ -528,7 +607,7 @@ class LowestLatencyRoutesOptimizer:
         return cmd
 
     def _route_exists(self, destination: str) -> bool:
-        cmd = [self.config["ip_bin"], "route", "show", "%s/32" % destination]
+        cmd = [self.config["ip_bin"], "route", "show", _host_route_target(destination)]
         self._log_cmd(cmd)
         try:
             completed = subprocess.run(
@@ -548,7 +627,7 @@ class LowestLatencyRoutesOptimizer:
             return True
         return bool(completed.stdout.strip())
 
-    def apply_route_config(self, host: str, route_name: str) -> None:
+    def apply_route_config(self, host: str, route_name: str) -> bool:
         """
         Applies the route configuration.
 
@@ -561,16 +640,17 @@ class LowestLatencyRoutesOptimizer:
             route_name (str): The route candidate name to use.
 
         Returns:
-            None
+            bool: True if all destination routes were applied, False otherwise.
         """
         route = self.routes_by_name.get(route_name)
         if route is None:
             logging.error("Unknown route '%s' for host '%s'", route_name, host)
-            return
+            return False
 
         hosts_to_add = self._destinations_for_host(host)
 
         logging.info("Apply %s => %s", host, route_name)
+        all_ok = True
         for destination in hosts_to_add:
             if destination not in self.current_routes:
                 ok, error_text = self._run_ip(self._route_cmd("add", destination, route))
@@ -579,13 +659,16 @@ class LowestLatencyRoutesOptimizer:
                     continue
                 if "RTNETLINK answers: File exists" not in error_text:
                     logging.error("Failed to add route for %s: %s", destination, error_text)
+                    all_ok = False
                     continue
 
             ok, error_text = self._run_ip(self._route_cmd("replace", destination, route))
             if not ok:
                 logging.error("Failed to replace route for %s: %s", destination, error_text)
+                all_ok = False
                 continue
             self.current_routes[destination] = route_name
+        return all_ok
 
     async def _execute_probes(self) -> Tuple[List[Any], List[str]]:
         tasks = []
@@ -624,20 +707,25 @@ class LowestLatencyRoutesOptimizer:
             for host in hosts:
                 if host.address not in probe_snapshot:
                     probe_snapshot[host.address] = {}
+                # icmplib reports packet_loss as a 0..1 ratio; convert to percent
+                # to match packet_loss_threshold and status output semantics.
                 probe_snapshot[host.address][source] = {
                     "avg_rtt": host.avg_rtt,
-                    "avg_loss": host.packet_loss,
+                    "avg_loss": host.packet_loss * 100,
                     "is_alive": bool(host.is_alive),
                 }
-                if not host.is_alive:
-                    continue
-                sources_up.add(source)
                 if host.address not in new_sums:
                     new_sums[host.address] = {}
                 if source not in new_sums[host.address]:
-                    new_sums[host.address][source] = {"rtt": 0.0, "loss": 0.0}
-                new_sums[host.address][source]["rtt"] += host.avg_rtt
-                new_sums[host.address][source]["loss"] += host.packet_loss
+                    new_sums[host.address][source] = {"rtt": 0.0, "loss": 0.0, "checks": 0, "alive": 0}
+                metrics = new_sums[host.address][source]
+                metrics["checks"] += 1
+                metrics["loss"] += host.packet_loss * 100
+                if not host.is_alive:
+                    continue
+                sources_up.add(source)
+                metrics["rtt"] += host.avg_rtt
+                metrics["alive"] += 1
         return probe_snapshot, sources_up, new_sums
 
     @staticmethod
@@ -647,19 +735,24 @@ class LowestLatencyRoutesOptimizer:
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
         merged: Dict[str, Dict[str, Dict[str, float]]] = {}
         for host, sources in existing.items():
-            merged[host] = {src: {"rtt": data["rtt"], "loss": data["loss"]} for src, data in sources.items()}
+            merged[host] = {
+                src: {"rtt": data["rtt"], "loss": data["loss"], "checks": data["checks"], "alive": data["alive"]}
+                for src, data in sources.items()
+            }
         for host, sources in new.items():
             if host not in merged:
                 merged[host] = {}
             for src, metrics in sources.items():
                 if src not in merged[host]:
-                    merged[host][src] = {"rtt": 0.0, "loss": 0.0}
+                    merged[host][src] = {"rtt": 0.0, "loss": 0.0, "checks": 0, "alive": 0}
                 merged[host][src]["rtt"] += metrics["rtt"]
                 merged[host][src]["loss"] += metrics["loss"]
+                merged[host][src]["checks"] += metrics["checks"]
+                merged[host][src]["alive"] += metrics["alive"]
         return merged
 
     def _should_force_reset(self, sources_up: Set[str]) -> bool:
-        for _host, current in self.current_routes.items():
+        for current in self.current_routes.values():
             if current not in sources_up:
                 return True
         return False
@@ -673,7 +766,6 @@ class LowestLatencyRoutesOptimizer:
         switching_enabled: bool,
         override_route: Optional[str],
         host_results: Dict[str, Dict[str, float]],
-        checks: int,
         packet_loss_threshold: float,
         rtt_threshold: float,
     ) -> Tuple[str, Optional[str]]:
@@ -692,12 +784,13 @@ class LowestLatencyRoutesOptimizer:
             logging.debug("%s: Current route is already the fastest route", host)
             return "keep", None
 
-        current_loss = host_results[current_route]["loss"] / checks
-        current_rtt = host_results[current_route]["rtt"] / checks
-        if current_loss > packet_loss_threshold:
-            logging.warning("%s: Current route has paketloss, need to switch", host)
+        current_metrics = host_results[current_route]
+        current_loss = current_metrics["loss"] / current_metrics["checks"]
+        if current_metrics["alive"] == 0 or current_loss > packet_loss_threshold:
+            logging.warning("%s: Current route has packet loss, need to switch", host)
             return "apply", best_route[0]
 
+        current_rtt = current_metrics["rtt"] / current_metrics["alive"]
         rtt_diff = current_rtt - best_route[1]
         logging.debug(
             "%s: rtt_diff: %s, (%s) %s (%s) %s ",
@@ -721,16 +814,20 @@ class LowestLatencyRoutesOptimizer:
 
         return "apply", best_route[0]
 
-    async def _apply_routes_for_cycle(self, sums: Dict[str, Dict[str, Dict[str, float]]], checks: int) -> List[str]:
+    async def _apply_routes_for_cycle(self, sums: Dict[str, Dict[str, Dict[str, float]]]) -> List[str]:
         valid_source_found: List[str] = []
         for host, results in sums.items():
             candidates: List[Tuple[str, float, float]] = []
             for source, metrics in results.items():
-                avg_rtt = metrics["rtt"] / checks
-                avg_loss = metrics["loss"] / checks
+                if metrics["alive"] == 0:
+                    continue
+                avg_rtt = metrics["rtt"] / metrics["alive"]
+                avg_loss = metrics["loss"] / metrics["checks"]
                 candidates.append((source, avg_rtt, avg_loss))
                 logging.debug("%s: %s: %s %s", host, source, avg_rtt, avg_loss)
 
+            if not candidates:
+                continue
             best_route = sorted(candidates, key=lambda y: (y[2], y[1]))[0]
             current_route = self.current_routes.get(host)
 
@@ -747,7 +844,6 @@ class LowestLatencyRoutesOptimizer:
                 switching_enabled,
                 override_route,
                 results,
-                checks,
                 self.config["packet_loss_threshold"],
                 self.config["rtt_threshold"],
             )
@@ -772,11 +868,20 @@ class LowestLatencyRoutesOptimizer:
             valid_source_found.append(host)
         return valid_source_found
 
-    def _handle_fallbacks(self, valid_source_found: List[str]) -> None:
+    async def _handle_fallbacks(self, valid_source_found: List[str]) -> None:
         for sip in self.config["monitor"]:
             if sip in valid_source_found:
                 continue
             logging.warning("No valid source found for %s", sip)
+            async with self._get_state_lock():
+                mode = self.route_modes.get(sip, "auto")
+                switching_enabled = bool(self.switching_enabled.get(sip, True))
+                override_route = self.override_routes.get(sip)
+            if mode == "override" and override_route:
+                self.apply_route_config(sip, override_route)
+                continue
+            if mode == "frozen" or not switching_enabled:
+                continue
             fallback = self.config.get("fallback_routes", {}).get(sip)
             if fallback:
                 self.apply_route_config(sip, fallback)
@@ -820,8 +925,8 @@ class LowestLatencyRoutesOptimizer:
             checks += 1
 
             if checks >= self.config["test_count"] or force_reset or not self.current_routes:
-                valid_source_found = await self._apply_routes_for_cycle(sums, checks)
-                self._handle_fallbacks(valid_source_found)
+                valid_source_found = await self._apply_routes_for_cycle(sums)
+                await self._handle_fallbacks(valid_source_found)
                 checks = 0
                 sums = {}
 
@@ -866,10 +971,15 @@ def main() -> None:
         sys.exit(1)
 
     if llro_instance.config.get("systemd_logging") or args.systemd_logging:
+        # logging.basicConfig(force=True) requires Python 3.8+; remove the
+        # handlers installed at import time manually for Python 3.7 support.
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            handler.close()
         logging.basicConfig(
             level=logging.DEBUG if llro_instance.config.get("debug") else logging.INFO,
             format="%(levelname)-8s %(message)s",
-            force=True,
         )
     if llro_instance.config.get("debug"):
         logging.getLogger("root").setLevel(logging.DEBUG)

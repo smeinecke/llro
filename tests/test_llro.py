@@ -305,6 +305,114 @@ def test_run_async_switches_on_packet_loss(monkeypatch: pytest.MonkeyPatch) -> N
     assert ("1.1.1.1", "wan_b") in applied
 
 
+def test_run_async_switches_on_packet_loss_percent_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    # icmplib reports packet_loss as a 0..1 ratio; thresholds are configured in %.
+    # 50% loss (ratio 0.5) must exceed a 5% threshold and force a switch.
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+        "test_count": 1,
+        "packet_loss_threshold": 5,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    applied = []
+
+    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+        if kwargs["source"] == "10.0.0.1":
+            return [make_host("1.1.1.1", True, 40, 0.5)]
+        return [make_host("1.1.1.1", True, 50, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert ("1.1.1.1", "wan_b") in applied
+
+
+def test_run_async_prefers_stable_route_over_flapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    # wan_b answers only 1 of 3 probe rounds. Averaging must not reward it for
+    # the rounds where it was completely dead.
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+        "test_count": 3,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    applied = []
+    wan_b_calls = {"count": 0}
+    sleep_calls = {"count": 0}
+
+    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+        if kwargs["source"] == "10.0.0.1":
+            return [make_host("1.1.1.1", True, 40, 0)]
+        wan_b_calls["count"] += 1
+        if wan_b_calls["count"] == 1:
+            return [make_host("1.1.1.1", True, 10, 0)]
+        return [make_host("1.1.1.1", False, 0, 1.0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] >= 3:
+            raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+    monkeypatch.setattr(optimizer, "_route_exists", lambda _destination: True)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert applied == []
+
+
+def test_run_async_frozen_host_not_cleared_when_probes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+        ],
+        "test_count": 1,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    optimizer.route_modes["1.1.1.1"] = "frozen"
+    optimizer.switching_enabled["1.1.1.1"] = False
+    cleared = []
+
+    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+        return [make_host("1.1.1.1", False, 0, 1.0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert cleared == []
+
+
 def test_admin_actions_override_disable_reset(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = {
         "monitor": ["1.1.1.1"],
@@ -800,6 +908,62 @@ def test_normalize_config_rejects_invalid_monitor_ip() -> None:
     cfg["monitor"] = ["not-an-ip"]
     with pytest.raises(llro.ConfigError, match="valid IP address"):
         llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_duplicate_monitor_entries() -> None:
+    cfg = make_routes_config()
+    cfg["monitor"] = ["1.1.1.1", "1.1.1.1"]
+    with pytest.raises(llro.ConfigError, match="duplicate"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_also_route_conflicts() -> None:
+    cfg = make_routes_config()
+    cfg["monitor"] = ["1.1.1.1", "2.2.2.2"]
+    cfg["also_route"] = {"1.1.1.1": ["2.2.2.2"]}
+    with pytest.raises(llro.ConfigError, match="must not be a monitored host"):
+        llro.normalize_config(cfg)
+
+    cfg["also_route"] = {"1.1.1.1": ["9.9.9.9"], "2.2.2.2": ["9.9.9.9"]}
+    with pytest.raises(llro.ConfigError, match="multiple hosts"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_rejects_out_of_range_thresholds() -> None:
+    cfg = make_routes_config()
+    cfg["rtt_threshold"] = -1
+    with pytest.raises(llro.ConfigError, match="rtt_threshold"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["packet_loss_threshold"] = 101
+    with pytest.raises(llro.ConfigError, match="packet_loss_threshold"):
+        llro.normalize_config(cfg)
+
+
+def test_normalize_config_bool_coercion() -> None:
+    cfg = make_routes_config()
+    cfg["delete_preadded_routes"] = "false"
+    cfg["debug"] = "yes"
+    normalized = llro.normalize_config(cfg)
+    assert normalized["delete_preadded_routes"] is False
+    assert normalized["debug"] is True
+
+    cfg = make_routes_config()
+    cfg["systemd_logging"] = "maybe"
+    with pytest.raises(llro.ConfigError, match="boolean"):
+        llro.normalize_config(cfg)
+
+
+def test_route_cmd_uses_128_prefix_for_ipv6() -> None:
+    cfg = make_routes_config()
+    cfg["monitor"] = ["2001:db8::1"]
+    cfg["routes"][0]["probe_source"] = "fd00::1"
+    cfg["routes"][0]["gateway"] = "fd00::fe"
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    route = optimizer.routes_by_name["wan_a"]
+    cmd = optimizer._route_cmd("add", "2001:db8::1", route)
+    assert "2001:db8::1/128" in cmd
 
 
 def test_normalize_config_rejects_invalid_also_route_ip() -> None:

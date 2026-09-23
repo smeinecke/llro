@@ -200,7 +200,7 @@ $ llro-cli status --json
 
 ```text
 $ llro-cli override --host 1.1.1.1 --route wan_lte
-{"host": "1.1.1.1", "mode": "override", "route": "wan_lte"}
+{"host": "1.1.1.1", "mode": "override", "route": "wan_lte", "route_applied": true}
 
 $ llro-cli disable-switching --all
 {"hosts": ["1.1.1.1", "8.8.8.8"], "mode": "frozen"}

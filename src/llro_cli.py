@@ -23,13 +23,19 @@ def _send_request(
         except OSError as exc:
             raise RuntimeError("failed to connect to %s: %s" % (socket_path, exc))
 
-        client.sendall(message)
+        try:
+            client.sendall(message)
+        except (socket.timeout, OSError) as exc:
+            raise RuntimeError("failed to send request to %s: %s" % (socket_path, exc))
+
         chunks = []
         while True:
             try:
                 chunk = client.recv(4096)
             except socket.timeout:
                 raise RuntimeError("read from %s timed out after %.1fs" % (socket_path, timeout_seconds))
+            except OSError as exc:
+                raise RuntimeError("failed to read response from %s: %s" % (socket_path, exc))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -76,25 +82,28 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="llro-cli",
         description="Admin client for LLRO daemon over Unix socket",
     )
+    parser.add_argument("--socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="admin socket path")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # --socket is also accepted after the subcommand for convenience; the
+    # SUPPRESS default keeps a value given before the subcommand intact.
     status = subparsers.add_parser("status", help="show daemon routing status")
-    status.add_argument("--socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="admin socket path")
+    status.add_argument("--socket", default=argparse.SUPPRESS, help="admin socket path")
     status.add_argument("--json", action="store_true", dest="as_json", help="print raw JSON")
 
     override = subparsers.add_parser("override", help="override route for a host")
-    override.add_argument("--socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="admin socket path")
+    override.add_argument("--socket", default=argparse.SUPPRESS, help="admin socket path")
     override.add_argument("--host", required=True, help="monitored host to control")
     override.add_argument("--route", required=True, help="route name to pin")
 
     disable_switching = subparsers.add_parser("disable-switching", help="disable route switching")
-    disable_switching.add_argument("--socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="admin socket path")
+    disable_switching.add_argument("--socket", default=argparse.SUPPRESS, help="admin socket path")
     target_disable = disable_switching.add_mutually_exclusive_group(required=True)
     target_disable.add_argument("--host", help="disable switching for one monitored host")
     target_disable.add_argument("--all", action="store_true", help="disable switching for all monitored hosts")
 
     reset_auto = subparsers.add_parser("reset-auto", help="reset control mode back to auto routing")
-    reset_auto.add_argument("--socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="admin socket path")
+    reset_auto.add_argument("--socket", default=argparse.SUPPRESS, help="admin socket path")
     target_reset = reset_auto.add_mutually_exclusive_group(required=True)
     target_reset.add_argument("--host", help="reset one monitored host")
     target_reset.add_argument("--all", action="store_true", help="reset all monitored hosts")
