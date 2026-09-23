@@ -3,7 +3,7 @@ import argparse
 import json
 import socket
 import sys
-from typing import Any, Dict, List
+from typing import Any
 
 from llro import DEFAULT_ADMIN_SOCKET_PATH
 
@@ -11,31 +11,31 @@ DEFAULT_SOCKET_TIMEOUT_SECONDS = 5.0
 
 
 def _send_request(
-    socket_path: str, payload: Dict[str, Any], timeout_seconds: float = DEFAULT_SOCKET_TIMEOUT_SECONDS
-) -> Dict[str, Any]:
+    socket_path: str, payload: dict[str, Any], timeout_seconds: float = DEFAULT_SOCKET_TIMEOUT_SECONDS
+) -> dict[str, Any]:
     message = (json.dumps(payload) + "\n").encode("utf-8")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout_seconds)
         try:
             client.connect(socket_path)
-        except socket.timeout:
-            raise RuntimeError("connection to %s timed out after %.1fs" % (socket_path, timeout_seconds))
+        except TimeoutError:
+            raise RuntimeError(f"connection to {socket_path} timed out after {timeout_seconds:.1f}s")
         except OSError as exc:
-            raise RuntimeError("failed to connect to %s: %s" % (socket_path, exc))
+            raise RuntimeError(f"failed to connect to {socket_path}: {exc}")
 
         try:
             client.sendall(message)
-        except (socket.timeout, OSError) as exc:
-            raise RuntimeError("failed to send request to %s: %s" % (socket_path, exc))
+        except (TimeoutError, OSError) as exc:
+            raise RuntimeError(f"failed to send request to {socket_path}: {exc}")
 
         chunks = []
         while True:
             try:
                 chunk = client.recv(4096)
-            except socket.timeout:
-                raise RuntimeError("read from %s timed out after %.1fs" % (socket_path, timeout_seconds))
+            except TimeoutError:
+                raise RuntimeError(f"read from {socket_path} timed out after {timeout_seconds:.1f}s")
             except OSError as exc:
-                raise RuntimeError("failed to read response from %s: %s" % (socket_path, exc))
+                raise RuntimeError(f"failed to read response from {socket_path}: {exc}")
             if not chunk:
                 break
             chunks.append(chunk)
@@ -46,10 +46,10 @@ def _send_request(
     try:
         return json.loads(b"".join(chunks).decode("utf-8").strip())
     except ValueError as exc:
-        raise RuntimeError("invalid response from daemon: %s" % exc)
+        raise RuntimeError(f"invalid response from daemon: {exc}")
 
 
-def _format_status_table(hosts: List[Dict[str, Any]]) -> str:
+def _format_status_table(hosts: list[dict[str, Any]]) -> str:
     lines = []
     for item in hosts:
         host = item.get("host")
@@ -58,8 +58,7 @@ def _format_status_table(hosts: List[Dict[str, Any]]) -> str:
         override_route = item.get("override_route") or "-"
         switching_enabled = "yes" if item.get("switching_enabled") else "no"
         lines.append(
-            "Host %s | mode=%s | switching=%s | current=%s | override=%s"
-            % (host, mode, switching_enabled, current_route, override_route)
+            f"Host {host} | mode={mode} | switching={switching_enabled} | current={current_route} | override={override_route}"
         )
 
         routes = item.get("routes") or {}
@@ -73,7 +72,7 @@ def _format_status_table(hosts: List[Dict[str, Any]]) -> str:
             avg_rtt = route_data.get("avg_rtt")
             avg_loss = route_data.get("avg_loss")
             is_alive = "yes" if route_data.get("is_alive") else "no"
-            lines.append("  %s: rtt=%s ms, loss=%s%%, alive=%s" % (route_name, avg_rtt, avg_loss, is_alive))
+            lines.append(f"  {route_name}: rtt={avg_rtt} ms, loss={avg_loss}%, alive={is_alive}")
     return "\n".join(lines)
 
 
@@ -111,7 +110,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_payload(args: argparse.Namespace) -> Dict[str, Any]:
+def _make_payload(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "status":
         return {"action": "status"}
 
@@ -119,7 +118,7 @@ def _make_payload(args: argparse.Namespace) -> Dict[str, Any]:
         return {"action": "override", "host": args.host, "route": args.route}
 
     if args.command == "disable-switching":
-        payload = {"action": "disable_switching"}  # type: Dict[str, Any]
+        payload: dict[str, Any] = {"action": "disable_switching"}
         if args.all:
             payload["all"] = True
         else:
@@ -127,7 +126,7 @@ def _make_payload(args: argparse.Namespace) -> Dict[str, Any]:
         return payload
 
     if args.command == "reset-auto":
-        payload = {"action": "reset_auto"}  # type: Dict[str, Any]
+        payload: dict[str, Any] = {"action": "reset_auto"}
         if args.all:
             payload["all"] = True
         else:

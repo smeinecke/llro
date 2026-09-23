@@ -12,7 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 import yaml
 from icmplib import async_multiping
@@ -31,30 +31,30 @@ class ConfigError(ValueError):
 
 def _as_float(value: Any, field_name: str) -> float:
     if isinstance(value, bool):
-        raise ConfigError("%s must be a number" % field_name)
+        raise ConfigError(f"{field_name} must be a number")
     try:
         result = float(value)
     except (TypeError, ValueError):
-        raise ConfigError("%s must be a number" % field_name)
+        raise ConfigError(f"{field_name} must be a number")
     if not math.isfinite(result):
-        raise ConfigError("%s must be a finite number" % field_name)
+        raise ConfigError(f"{field_name} must be a finite number")
     return result
 
 
 def _as_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool):
-        raise ConfigError("%s must be an integer" % field_name)
+        raise ConfigError(f"{field_name} must be an integer")
     if isinstance(value, float) and not value.is_integer():
-        raise ConfigError("%s must be an integer" % field_name)
+        raise ConfigError(f"{field_name} must be an integer")
     try:
         return int(value)
     except (TypeError, ValueError, OverflowError):
-        raise ConfigError("%s must be an integer" % field_name)
+        raise ConfigError(f"{field_name} must be an integer")
 
 
 def _as_non_empty_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ConfigError("%s must be a non-empty string" % field_name)
+        raise ConfigError(f"{field_name} must be a non-empty string")
     return value.strip()
 
 
@@ -69,12 +69,12 @@ def _as_bool(value: Any, field_name: str) -> bool:
             return True
         if lowered in ("false", "no", "off", "0"):
             return False
-    raise ConfigError("%s must be a boolean" % field_name)
+    raise ConfigError(f"{field_name} must be a boolean")
 
 
 def _host_route_target(address: str) -> str:
     version = ipaddress.ip_address(address).version
-    return "%s/%d" % (address, 32 if version == 4 else 128)
+    return f"{address}/{32 if version == 4 else 128}"
 
 
 _DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
@@ -86,7 +86,7 @@ def _validate_ip_address(value: str, field_name: str) -> str:
         # reported back by icmplib (e.g. compressed lowercase IPv6).
         return str(ipaddress.ip_address(value))
     except ValueError:
-        raise ConfigError("%s must be a valid IP address, got '%s'" % (field_name, value))
+        raise ConfigError(f"{field_name} must be a valid IP address, got '{value}'")
 
 
 def _canonical_ip_or_value(value: str) -> str:
@@ -98,24 +98,24 @@ def _canonical_ip_or_value(value: str) -> str:
 
 def _validate_device_name(value: str, field_name: str) -> str:
     if not _DEVICE_NAME_RE.match(value):
-        raise ConfigError("%s must be a valid device name, got '%s'" % (field_name, value))
+        raise ConfigError(f"{field_name} must be a valid device name, got '{value}'")
     return value
 
 
 def _validate_absolute_path(value: str, field_name: str) -> str:
     if not os.path.isabs(value):
-        raise ConfigError("%s must be an absolute path, got '%s'" % (field_name, value))
+        raise ConfigError(f"{field_name} must be an absolute path, got '{value}'")
     return value
 
 
 def _validate_ip_bin(value: str, field_name: str) -> str:
     _validate_absolute_path(value, field_name)
     if os.path.exists(value) and not os.access(value, os.X_OK):
-        raise ConfigError("%s is not executable: '%s'" % (field_name, value))
+        raise ConfigError(f"{field_name} is not executable: '{value}'")
     return value
 
 
-def _normalize_monitor(config: Dict[str, Any]) -> List[str]:
+def _normalize_monitor(config: dict[str, Any]) -> list[str]:
     monitor = config.get("monitor")
     if not isinstance(monitor, list) or not monitor:
         raise ConfigError("Config does not contain a non-empty monitor list")
@@ -127,7 +127,7 @@ def _normalize_monitor(config: Dict[str, Any]) -> List[str]:
     return normalized
 
 
-def _normalize_also_route(config: Dict[str, Any], monitor: List[str]) -> Dict[str, List[str]]:
+def _normalize_also_route(config: dict[str, Any], monitor: list[str]) -> dict[str, list[str]]:
     raw_also_route = config.get("also_route", {})
     if not isinstance(raw_also_route, dict):
         raise ConfigError("also_route must be a mapping")
@@ -138,7 +138,7 @@ def _normalize_also_route(config: Dict[str, Any], monitor: List[str]) -> Dict[st
     for host, mapped_hosts in raw_also_route.items():
         key = _validate_ip_address(_as_non_empty_string(host, "also_route key"), "also_route key")
         if key not in monitor_set:
-            raise ConfigError("also_route key '%s' must exist in monitor" % key)
+            raise ConfigError(f"also_route key '{key}' must exist in monitor")
         if not isinstance(mapped_hosts, list):
             raise ConfigError("also_route values must be lists")
         normalized[key] = [
@@ -147,14 +147,14 @@ def _normalize_also_route(config: Dict[str, Any], monitor: List[str]) -> Dict[st
         ]
         for value in normalized[key]:
             if value in monitor_set:
-                raise ConfigError("also_route value '%s' must not be a monitored host" % value)
+                raise ConfigError(f"also_route value '{value}' must not be a monitored host")
             if value in seen_values:
-                raise ConfigError("also_route value '%s' is assigned to multiple hosts" % value)
+                raise ConfigError(f"also_route value '{value}' is assigned to multiple hosts")
             seen_values.add(value)
     return normalized
 
 
-def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
+def _normalize_routes(config: dict[str, Any]) -> list[dict[str, str]]:
     raw_routes = config.get("routes")
     routes = []
 
@@ -163,19 +163,19 @@ def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
             raise ConfigError("routes must be a non-empty list")
         for index, route in enumerate(raw_routes):
             if not isinstance(route, dict):
-                raise ConfigError("routes[%s] must be a mapping" % index)
-            name = _as_non_empty_string(route.get("name"), "routes[%s].name" % index)
+                raise ConfigError(f"routes[{index}] must be a mapping")
+            name = _as_non_empty_string(route.get("name"), f"routes[{index}].name")
             device = _validate_device_name(
-                _as_non_empty_string(route.get("device"), "routes[%s].device" % index),
-                "routes[%s].device" % index,
+                _as_non_empty_string(route.get("device"), f"routes[{index}].device"),
+                f"routes[{index}].device",
             )
             probe_source = _validate_ip_address(
-                _as_non_empty_string(route.get("probe_source"), "routes[%s].probe_source" % index),
-                "routes[%s].probe_source" % index,
+                _as_non_empty_string(route.get("probe_source"), f"routes[{index}].probe_source"),
+                f"routes[{index}].probe_source",
             )
             gateway = _validate_ip_address(
-                _as_non_empty_string(route.get("gateway"), "routes[%s].gateway" % index),
-                "routes[%s].gateway" % index,
+                _as_non_empty_string(route.get("gateway"), f"routes[{index}].gateway"),
+                f"routes[{index}].gateway",
             )
             routes.append(
                 {
@@ -198,16 +198,16 @@ def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
             "interfaces key",
         )
         if not isinstance(probe_sources, list) or not probe_sources:
-            raise ConfigError("interfaces[%s] must be a non-empty list" % dev_name)
+            raise ConfigError(f"interfaces[{dev_name}] must be a non-empty list")
         for probe_source in probe_sources:
             src = _validate_ip_address(
-                _as_non_empty_string(probe_source, "interfaces[%s] source" % dev_name),
-                "interfaces[%s] source" % dev_name,
+                _as_non_empty_string(probe_source, f"interfaces[{dev_name}] source"),
+                f"interfaces[{dev_name}] source",
             )
             # Legacy behavior treated source and gateway as the same value.
             routes.append(
                 {
-                    "name": "%s:%s" % (dev_name, src),
+                    "name": f"{dev_name}:{src}",
                     "device": dev_name,
                     "probe_source": src,
                     "gateway": src,
@@ -217,14 +217,14 @@ def _normalize_routes(config: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def _normalize_fallback_routes(
-    raw_fallback_routes: Any, monitor: List[str], routes: List[Dict[str, str]]
-) -> Dict[str, str]:
+    raw_fallback_routes: Any, monitor: list[str], routes: list[dict[str, str]]
+) -> dict[str, str]:
     if raw_fallback_routes is None:
         return {}
     if not isinstance(raw_fallback_routes, dict):
         raise ConfigError("fallback_routes must be a mapping")
 
-    route_names = set(route["name"] for route in routes)
+    route_names = {route["name"] for route in routes}
     by_probe_source = {}
     by_gateway = {}
     for route in routes:
@@ -236,8 +236,8 @@ def _normalize_fallback_routes(
     for host, route_ref in raw_fallback_routes.items():
         host_key = _validate_ip_address(_as_non_empty_string(host, "fallback_routes key"), "fallback_routes key")
         if host_key not in monitor_set:
-            raise ConfigError("fallback_routes key '%s' must exist in monitor" % host_key)
-        ref = _as_non_empty_string(route_ref, "fallback_routes[%s]" % host_key)
+            raise ConfigError(f"fallback_routes key '{host_key}' must exist in monitor")
+        ref = _as_non_empty_string(route_ref, f"fallback_routes[{host_key}]")
 
         if ref in route_names:
             normalized[host_key] = ref
@@ -249,11 +249,11 @@ def _normalize_fallback_routes(
         if ref_ip in by_gateway and len(by_gateway[ref_ip]) == 1:
             normalized[host_key] = by_gateway[ref_ip][0]
             continue
-        raise ConfigError("fallback route '%s' for host '%s' does not match a configured route" % (ref, host_key))
+        raise ConfigError(f"fallback route '{ref}' for host '{host_key}' does not match a configured route")
     return normalized
 
 
-def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_config(raw_config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_config, dict):
         raise ConfigError("Config must be a mapping")
 
@@ -264,7 +264,7 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     route_names = set()
     for route in routes:
         if route["name"] in route_names:
-            raise ConfigError("Duplicate route name '%s'" % route["name"])
+            raise ConfigError(f"Duplicate route name '{route['name']}'")
         route_names.add(route["name"])
 
     test_count = _as_int(raw_config.get("test_count", 3), "test_count")
@@ -328,24 +328,24 @@ def normalize_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class LowestLatencyRoutesOptimizer:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = normalize_config(config)
-        self.routes = self.config["routes"]  # type: List[Dict[str, str]]
-        self.routes_by_name = dict((route["name"], route) for route in self.routes)  # type: Dict[str, Dict[str, str]]
-        self.current_routes = {}  # type: Dict[str, str]
-        self.route_modes = dict((host, "auto") for host in self.config["monitor"])  # type: Dict[str, str]
-        self.override_routes = {}  # type: Dict[str, str]
-        self.switching_enabled = dict((host, True) for host in self.config["monitor"])  # type: Dict[str, bool]
-        self.last_probe_snapshot = {}  # type: Dict[str, Dict[str, Dict[str, Any]]]
-        self._state_lock = None  # type: Optional[asyncio.Lock]
-        self._admin_server = None  # type: Optional[asyncio.base_events.Server]
+        self.routes: list[dict[str, str]] = self.config["routes"]
+        self.routes_by_name: dict[str, dict[str, str]] = {route["name"]: route for route in self.routes}
+        self.current_routes: dict[str, str] = {}
+        self.route_modes: dict[str, str] = dict.fromkeys(self.config["monitor"], "auto")
+        self.override_routes: dict[str, str] = {}
+        self.switching_enabled: dict[str, bool] = dict.fromkeys(self.config["monitor"], True)
+        self.last_probe_snapshot: dict[str, dict[str, dict[str, Any]]] = {}
+        self._state_lock: asyncio.Lock | None = None
+        self._admin_server: asyncio.base_events.Server | None = None
 
     def _get_state_lock(self) -> asyncio.Lock:
         if self._state_lock is None:
             self._state_lock = asyncio.Lock()
         return self._state_lock
 
-    def _destinations_for_host(self, host: str) -> List[str]:
+    def _destinations_for_host(self, host: str) -> list[str]:
         return [host] + self.config.get("also_route", {}).get(host, [])
 
     def run(self):
@@ -391,7 +391,7 @@ class LowestLatencyRoutesOptimizer:
             if stat.S_ISSOCK(mode):
                 os.unlink(socket_path)
             else:
-                raise RuntimeError("admin_socket_path exists and is not a socket: %s" % socket_path)
+                raise RuntimeError(f"admin_socket_path exists and is not a socket: {socket_path}")
 
         self._admin_server = await asyncio.start_unix_server(self._handle_admin_client, path=socket_path)
         os.chmod(socket_path, 0o600)
@@ -435,7 +435,7 @@ class LowestLatencyRoutesOptimizer:
         except OSError:
             pass
 
-    async def _build_status_data(self) -> Dict[str, Any]:
+    async def _build_status_data(self) -> dict[str, Any]:
         async with self._get_state_lock():
             hosts = []
             for host in self.config["monitor"]:
@@ -451,7 +451,7 @@ class LowestLatencyRoutesOptimizer:
                 )
         return {"hosts": hosts}
 
-    async def _handle_admin_action(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def _handle_admin_action(self, request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(request, dict):
             return {"ok": False, "error": "request must be a JSON object"}
 
@@ -466,9 +466,9 @@ class LowestLatencyRoutesOptimizer:
                 return {"ok": False, "error": "host and route must be strings"}
             host = _canonical_ip_or_value(host)
             if host not in self.config["monitor"]:
-                return {"ok": False, "error": "unknown host '%s'" % host}
+                return {"ok": False, "error": f"unknown host '{host}'"}
             if route not in self.routes_by_name:
-                return {"ok": False, "error": "unknown route '%s'" % route}
+                return {"ok": False, "error": f"unknown route '{route}'"}
             async with self._get_state_lock():
                 self.route_modes[host] = "override"
                 self.switching_enabled[host] = True
@@ -501,9 +501,9 @@ class LowestLatencyRoutesOptimizer:
                     self.override_routes.pop(host, None)
             return {"ok": True, "data": {"hosts": targets, "mode": "auto"}}
 
-        return {"ok": False, "error": "unsupported action '%s'" % action}
+        return {"ok": False, "error": f"unsupported action '{action}'"}
 
-    def _resolve_targets(self, request: Dict[str, Any]) -> Optional[List[str]]:
+    def _resolve_targets(self, request: dict[str, Any]) -> list[str] | None:
         if request.get("all") is True:
             return list(self.config["monitor"])
 
@@ -514,19 +514,18 @@ class LowestLatencyRoutesOptimizer:
                 return [host]
         return None
 
-    def _log_cmd(self, cmd: List[str]) -> None:
+    def _log_cmd(self, cmd: list[str]) -> None:
         logging.debug("cmd: %s", " ".join(shlex.quote(part) for part in cmd))
 
-    def _run_ip(self, args: List[str]) -> Tuple[bool, str]:
+    def _run_ip(self, args: list[str]) -> tuple[bool, str]:
         cmd = [self.config["ip_bin"]] + args
         self._log_cmd(cmd)
         try:
             completed = subprocess.run(
                 cmd,
                 check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
+                capture_output=True,
+                text=True,
                 timeout=self.config.get("ip_timeout", 10),
             )
         except subprocess.TimeoutExpired as exc:
@@ -544,7 +543,7 @@ class LowestLatencyRoutesOptimizer:
 
         stderr = (completed.stderr or "").strip()
         stdout = (completed.stdout or "").strip()
-        error_text = stderr or stdout or ("exit code %s" % completed.returncode)
+        error_text = stderr or stdout or (f"exit code {completed.returncode}")
         return False, error_text
 
     def clear_routes(self):
@@ -592,7 +591,7 @@ class LowestLatencyRoutesOptimizer:
             return
         logging.error("Failed to remove route for %s: %s", host, error_text)
 
-    def _route_cmd(self, action: str, destination: str, route: Dict[str, str]) -> List[str]:
+    def _route_cmd(self, action: str, destination: str, route: dict[str, str]) -> list[str]:
         cmd = [
             "route",
             action,
@@ -613,9 +612,8 @@ class LowestLatencyRoutesOptimizer:
             completed = subprocess.run(
                 cmd,
                 check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
+                capture_output=True,
+                text=True,
                 timeout=self.config.get("ip_timeout", 10),
             )
         except Exception as exc:
@@ -670,7 +668,7 @@ class LowestLatencyRoutesOptimizer:
             self.current_routes[destination] = route_name
         return all_ok
 
-    async def _execute_probes(self) -> Tuple[List[Any], List[str]]:
+    async def _execute_probes(self) -> tuple[list[Any], list[str]]:
         tasks = []
         route_names = []
         for route in self.routes:
@@ -691,11 +689,11 @@ class LowestLatencyRoutesOptimizer:
 
     @staticmethod
     def _aggregate_probe_results(
-        result: List[Any], route_names: List[str]
-    ) -> Tuple[Dict[str, Dict[str, Dict[str, Any]]], Set[str], Dict[str, Dict[str, Dict[str, float]]]]:
-        probe_snapshot: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        sources_up: Set[str] = set()
-        new_sums: Dict[str, Dict[str, Dict[str, float]]] = {}
+        result: list[Any], route_names: list[str]
+    ) -> tuple[dict[str, dict[str, dict[str, Any]]], set[str], dict[str, dict[str, dict[str, float]]]]:
+        probe_snapshot: dict[str, dict[str, dict[str, Any]]] = {}
+        sources_up: set[str] = set()
+        new_sums: dict[str, dict[str, dict[str, float]]] = {}
         for x, hosts in enumerate(result):
             source = route_names[x]
             if isinstance(hosts, BaseException):
@@ -730,10 +728,10 @@ class LowestLatencyRoutesOptimizer:
 
     @staticmethod
     def _merge_sums(
-        existing: Dict[str, Dict[str, Dict[str, float]]],
-        new: Dict[str, Dict[str, Dict[str, float]]],
-    ) -> Dict[str, Dict[str, Dict[str, float]]]:
-        merged: Dict[str, Dict[str, Dict[str, float]]] = {}
+        existing: dict[str, dict[str, dict[str, float]]],
+        new: dict[str, dict[str, dict[str, float]]],
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        merged: dict[str, dict[str, dict[str, float]]] = {}
         for host, sources in existing.items():
             merged[host] = {
                 src: {"rtt": data["rtt"], "loss": data["loss"], "checks": data["checks"], "alive": data["alive"]}
@@ -751,7 +749,7 @@ class LowestLatencyRoutesOptimizer:
                 merged[host][src]["alive"] += metrics["alive"]
         return merged
 
-    def _should_force_reset(self, sources_up: Set[str]) -> bool:
+    def _should_force_reset(self, sources_up: set[str]) -> bool:
         for current in self.current_routes.values():
             if current not in sources_up:
                 return True
@@ -760,15 +758,15 @@ class LowestLatencyRoutesOptimizer:
     @staticmethod
     def _resolve_route_action(
         host: str,
-        best_route: Tuple[str, float, float],
-        current_route: Optional[str],
+        best_route: tuple[str, float, float],
+        current_route: str | None,
         mode: str,
         switching_enabled: bool,
-        override_route: Optional[str],
-        host_results: Dict[str, Dict[str, float]],
+        override_route: str | None,
+        host_results: dict[str, dict[str, float]],
         packet_loss_threshold: float,
         rtt_threshold: float,
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, str | None]:
         if mode == "override" and override_route:
             if current_route != override_route:
                 return "apply", override_route
@@ -814,10 +812,10 @@ class LowestLatencyRoutesOptimizer:
 
         return "apply", best_route[0]
 
-    async def _apply_routes_for_cycle(self, sums: Dict[str, Dict[str, Dict[str, float]]]) -> List[str]:
-        valid_source_found: List[str] = []
+    async def _apply_routes_for_cycle(self, sums: dict[str, dict[str, dict[str, float]]]) -> list[str]:
+        valid_source_found: list[str] = []
         for host, results in sums.items():
-            candidates: List[Tuple[str, float, float]] = []
+            candidates: list[tuple[str, float, float]] = []
             for source, metrics in results.items():
                 if metrics["alive"] == 0:
                     continue
@@ -868,7 +866,7 @@ class LowestLatencyRoutesOptimizer:
             valid_source_found.append(host)
         return valid_source_found
 
-    async def _handle_fallbacks(self, valid_source_found: List[str]) -> None:
+    async def _handle_fallbacks(self, valid_source_found: list[str]) -> None:
         for sip in self.config["monitor"]:
             if sip in valid_source_found:
                 continue
@@ -890,16 +888,16 @@ class LowestLatencyRoutesOptimizer:
                 for destination in self._destinations_for_host(sip):
                     self.clear_route(destination)
 
-    async def _wait_interval(self, stop_event: Optional[asyncio.Event]) -> None:
+    async def _wait_interval(self, stop_event: asyncio.Event | None) -> None:
         if stop_event is None:
             await asyncio.sleep(self.config["scan_interval"])
             return
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=self.config["scan_interval"])
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
-    async def run_async(self, stop_event: Optional[asyncio.Event] = None):
+    async def run_async(self, stop_event: asyncio.Event | None = None):
         """
         Runs the main loop of the optimizer.
 
@@ -912,7 +910,7 @@ class LowestLatencyRoutesOptimizer:
             None
         """
         checks = 0
-        sums: Dict[str, Dict[str, Dict[str, float]]] = {}
+        sums: dict[str, dict[str, dict[str, float]]] = {}
         while not (stop_event is not None and stop_event.is_set()):
             result, route_names = await self._execute_probes()
             probe_snapshot, sources_up, new_sums = self._aggregate_probe_results(result, route_names)
@@ -950,7 +948,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        with open(args.config, "r", encoding="utf-8") as stream:
+        with open(args.config, encoding="utf-8") as stream:
             try:
                 config = yaml.safe_load(stream)
             except yaml.YAMLError as ex:

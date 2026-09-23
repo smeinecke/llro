@@ -67,7 +67,7 @@ def test_send_request_connect_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
             return None
 
         def connect(self, _path: str) -> None:
-            raise socket.timeout()
+            raise TimeoutError()
 
     monkeypatch.setattr(llro_cli.socket, "socket", lambda *_args, **_kwargs: TimeoutSocket())
     with pytest.raises(RuntimeError) as exc:

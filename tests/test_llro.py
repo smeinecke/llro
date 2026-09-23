@@ -4,7 +4,6 @@ import logging
 import os
 import subprocess
 from types import SimpleNamespace
-from typing import List
 
 import pytest
 
@@ -179,7 +178,7 @@ def test_run_async_forwards_payload_size_to_multiping(monkeypatch: pytest.Monkey
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     captured = {}
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         captured["payload_size"] = kwargs.get("payload_size")
         return [make_host("1.1.1.1", True, 10, 0)]
 
@@ -212,7 +211,7 @@ def test_run_async_applies_best_route_and_fallbacks(monkeypatch: pytest.MonkeyPa
     applied = []
     cleared = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         source = kwargs["source"]
         if source == "10.0.0.1":
             return [
@@ -253,7 +252,7 @@ def test_run_async_keeps_current_route_when_diff_below_threshold(monkeypatch: py
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 100, 0)]
         return [make_host("1.1.1.1", True, 90, 0)]
@@ -287,7 +286,7 @@ def test_run_async_switches_on_packet_loss(monkeypatch: pytest.MonkeyPatch) -> N
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 40, 50)]
         return [make_host("1.1.1.1", True, 50, 0)]
@@ -322,7 +321,7 @@ def test_run_async_switches_on_packet_loss_percent_units(monkeypatch: pytest.Mon
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 40, 0.5)]
         return [make_host("1.1.1.1", True, 50, 0)]
@@ -358,7 +357,7 @@ def test_run_async_prefers_stable_route_over_flapping(monkeypatch: pytest.Monkey
     wan_b_calls = {"count": 0}
     sleep_calls = {"count": 0}
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 40, 0)]
         wan_b_calls["count"] += 1
@@ -397,7 +396,7 @@ def test_run_async_frozen_host_not_cleared_when_probes_fail(monkeypatch: pytest.
     optimizer.switching_enabled["1.1.1.1"] = False
     cleared = []
 
-    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **_kwargs: object) -> list[SimpleNamespace]:
         return [make_host("1.1.1.1", False, 0, 1.0)]
 
     async def fake_sleep(_seconds: float) -> None:
@@ -478,7 +477,7 @@ def test_run_async_respects_route_override(monkeypatch: pytest.MonkeyPatch) -> N
     optimizer.override_routes["1.1.1.1"] = "wan_b"
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 10, 0)]
         return [make_host("1.1.1.1", True, 50, 0)]
@@ -512,7 +511,7 @@ def test_run_async_freeze_blocks_switching(monkeypatch: pytest.MonkeyPatch) -> N
     optimizer.switching_enabled["1.1.1.1"] = False
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 100, 0)]
         return [make_host("1.1.1.1", True, 10, 0)]
@@ -731,7 +730,7 @@ def test_run_async_stops_when_stop_event_set(monkeypatch: pytest.MonkeyPatch) ->
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     probe_calls = {"count": 0}
 
-    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **_kwargs: object) -> list[SimpleNamespace]:
         probe_calls["count"] += 1
         return [make_host("1.1.1.1", True, 10, 0)]
 
@@ -740,7 +739,7 @@ def test_run_async_stops_when_stop_event_set(monkeypatch: pytest.MonkeyPatch) ->
     async def runner() -> None:
         stop_event = asyncio.Event()
 
-        async def fake_wait_for(awaitable, timeout):  # type: ignore[no-untyped-def]
+        async def fake_wait_for(awaitable, **_kwargs):  # type: ignore[no-untyped-def]
             stop_event.set()
             return await awaitable
 
@@ -1049,7 +1048,7 @@ def test_run_async_clears_also_route_on_probe_failure_without_fallback(monkeypat
     optimizer.current_routes = {"1.1.1.1": "wan_a", "1.0.0.1": "wan_a"}
     cleared = []
 
-    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **_kwargs: object) -> list[SimpleNamespace]:
         return [make_host("1.1.1.1", False, 0, 100)]
 
     async def fake_sleep(_seconds: float) -> None:
@@ -1106,7 +1105,7 @@ def test_run_async_reapplies_route_missing_from_kernel(monkeypatch: pytest.Monke
     optimizer.current_routes = {"1.1.1.1": "wan_a"}
     applied = []
 
-    async def fake_multiping(_monitor: List[str], **kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
         if kwargs["source"] == "10.0.0.1":
             return [make_host("1.1.1.1", True, 100, 0)]
         return [make_host("1.1.1.1", True, 90, 0)]
@@ -1132,7 +1131,7 @@ def test_run_async_recovers_route_cleared_during_outage(monkeypatch: pytest.Monk
     cleared = []
     iterations = {"count": 0}
 
-    async def fake_multiping(_monitor: List[str], **_kwargs: object) -> List[SimpleNamespace]:
+    async def fake_multiping(_monitor: list[str], **_kwargs: object) -> list[SimpleNamespace]:
         alive = iterations["count"] > 0
         return [make_host("1.1.1.1", alive, 10 if alive else 0, 0 if alive else 100)]
 

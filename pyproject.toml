@@ -68,7 +68,7 @@ indent-style = "space"
 line-ending = "lf"
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "UP", "C4"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]

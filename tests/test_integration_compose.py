@@ -5,8 +5,9 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Dict, Iterator, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -22,15 +23,14 @@ pytestmark = pytest.mark.integration
 
 class ComposeTestbed(NamedTuple):
     project: str
-    env: Dict[str, str]
+    env: dict[str, str]
 
 
 def _run(cmd, env=None):  # type: ignore[no-untyped-def]
     return subprocess.run(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True,
+        capture_output=True,
+        text=True,
         check=False,
         env=env,
     )
@@ -53,24 +53,24 @@ def _docker_compose_available() -> bool:
     return _run(["docker", "compose", "version"]).returncode == 0
 
 
-def _build_network_env(project_name: str) -> Dict[str, str]:
+def _build_network_env(project_name: str) -> dict[str, str]:
     seed = int(project_name[-2:], 16)
     wan_a_octet = 100 + (seed % 50)
     wan_b_octet = 150 + (seed % 50)
     monitor_octet = 10 + (seed % 200)
 
     return {
-        "WAN_A_SUBNET": "172.30.%s.0/24" % wan_a_octet,
-        "WAN_B_SUBNET": "172.31.%s.0/24" % wan_b_octet,
-        "WAN_A_SOURCE_IP": "172.30.%s.10" % wan_a_octet,
-        "WAN_B_SOURCE_IP": "172.31.%s.10" % wan_b_octet,
-        "WAN_A_TARGET_IP": "172.30.%s.20" % wan_a_octet,
-        "WAN_B_TARGET_IP": "172.31.%s.20" % wan_b_octet,
-        "WAN_A_GATEWAY_IP": "172.30.%s.20" % wan_a_octet,
-        "WAN_B_GATEWAY_IP": "172.31.%s.20" % wan_b_octet,
-        "WAN_A_DOCKER_GW": "172.30.%s.254" % wan_a_octet,
-        "WAN_B_DOCKER_GW": "172.31.%s.254" % wan_b_octet,
-        "MONITOR_IP": "198.18.%s.10" % monitor_octet,
+        "WAN_A_SUBNET": f"172.30.{wan_a_octet}.0/24",
+        "WAN_B_SUBNET": f"172.31.{wan_b_octet}.0/24",
+        "WAN_A_SOURCE_IP": f"172.30.{wan_a_octet}.10",
+        "WAN_B_SOURCE_IP": f"172.31.{wan_b_octet}.10",
+        "WAN_A_TARGET_IP": f"172.30.{wan_a_octet}.20",
+        "WAN_B_TARGET_IP": f"172.31.{wan_b_octet}.20",
+        "WAN_A_GATEWAY_IP": f"172.30.{wan_a_octet}.20",
+        "WAN_B_GATEWAY_IP": f"172.31.{wan_b_octet}.20",
+        "WAN_A_DOCKER_GW": f"172.30.{wan_a_octet}.254",
+        "WAN_B_DOCKER_GW": f"172.31.{wan_b_octet}.254",
+        "MONITOR_IP": f"198.18.{monitor_octet}.10",
     }
 
 
@@ -83,7 +83,7 @@ def testbed() -> Iterator[ComposeTestbed]:
     testbed = None
     for _ in range(8):
         candidate = ComposeTestbed(
-            project="llroint%s" % uuid.uuid4().hex[:8],
+            project=f"llroint{uuid.uuid4().hex[:8]}",
             env={},
         )
         env = os.environ.copy()
@@ -94,7 +94,7 @@ def testbed() -> Iterator[ComposeTestbed]:
             break
         if "Pool overlaps with other one on this address space" in up.stderr:
             continue
-        pytest.fail("compose up failed:\nSTDOUT:\n%s\nSTDERR:\n%s" % (up.stdout, up.stderr))
+        pytest.fail(f"compose up failed:\nSTDOUT:\n{up.stdout}\nSTDERR:\n{up.stderr}")
     else:
         pytest.fail("compose up failed repeatedly due network overlap; please clean stale Docker networks")
 
@@ -114,9 +114,9 @@ def _reset_modes(testbed: ComposeTestbed) -> Iterator[None]:
         pass
 
 
-def _route_gateway(testbed: ComposeTestbed, monitor_ip: str) -> Optional[str]:
+def _route_gateway(testbed: ComposeTestbed, monitor_ip: str) -> str | None:
     """Return the gateway of the host route for monitor_ip, or None if absent."""
-    out = _exec(testbed, "llro", "ip", "route", "show", "%s/32" % monitor_ip)
+    out = _exec(testbed, "llro", "ip", "route", "show", f"{monitor_ip}/32")
     if out.returncode != 0:
         return None
     match = re.search(r"\bvia\s+(\S+)", out.stdout)
@@ -132,7 +132,7 @@ def _wait_for_gateway(testbed: ComposeTestbed, monitor_ip: str, expected_gateway
     return False
 
 
-def _wait_for_any_route(testbed: ComposeTestbed, monitor_ip: str, timeout_seconds: int) -> Optional[str]:
+def _wait_for_any_route(testbed: ComposeTestbed, monitor_ip: str, timeout_seconds: int) -> str | None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         gateway = _route_gateway(testbed, monitor_ip)
@@ -168,23 +168,23 @@ def _drop_icmp(testbed: ComposeTestbed, source_ip: str, monitor_ip: str) -> None
             "-j",
             "DROP",
         )
-        assert result.returncode == 0, "failed to apply target ICMP drop rule (%s):\n%s" % (chain, result.stderr)
+        assert result.returncode == 0, f"failed to apply target ICMP drop rule ({chain}):\n{result.stderr}"
 
 
-def _cli(testbed: ComposeTestbed, *args: str) -> Dict[str, Any]:
+def _cli(testbed: ComposeTestbed, *args: str) -> dict[str, Any]:
     """Run llro-cli inside the daemon container and return the parsed JSON payload."""
     out = _exec(testbed, "llro", "llro-cli", "--socket", ADMIN_SOCKET_PATH, *args)
-    assert out.returncode == 0, "llro-cli %s failed:\n%s" % (" ".join(args), out.stderr)
+    assert out.returncode == 0, "llro-cli {} failed:\n{}".format(" ".join(args), out.stderr)
     return json.loads(out.stdout)
 
 
-def _cli_status(testbed: ComposeTestbed, monitor_ip: str) -> Dict[str, Any]:
+def _cli_status(testbed: ComposeTestbed, monitor_ip: str) -> dict[str, Any]:
     status = _cli(testbed, "status", "--json")
     hosts = status.get("hosts") or []
     for host in hosts:
         if host.get("host") == monitor_ip:
             return host
-    pytest.fail("monitor host %s missing from status output: %s" % (monitor_ip, status))
+    pytest.fail(f"monitor host {monitor_ip} missing from status output: {status}")
 
 
 def _wait_for_all_routes_dead(testbed: ComposeTestbed, monitor_ip: str, timeout_seconds: int) -> bool:
@@ -208,7 +208,7 @@ def test_admin_socket_status_and_controls(testbed: ComposeTestbed) -> None:
     wan_gateways = {testbed.env["WAN_A_GATEWAY_IP"], testbed.env["WAN_B_GATEWAY_IP"]}
 
     initial_gateway = _wait_for_any_route(testbed, monitor_ip, ROUTE_TIMEOUT_SECONDS)
-    assert initial_gateway in wan_gateways, "LLRO did not establish an initial route, got: %s" % initial_gateway
+    assert initial_gateway in wan_gateways, f"LLRO did not establish an initial route, got: {initial_gateway}"
 
     assert _ping_from_source(testbed, testbed.env["WAN_A_SOURCE_IP"], monitor_ip), (
         "wan_a source cannot reach monitor before fault injection"
@@ -265,7 +265,7 @@ def test_route_switchover_when_icmp_blocked_on_one_path(testbed: ComposeTestbed)
     }
 
     current_gateway = _wait_for_any_route(testbed, monitor_ip, ROUTE_TIMEOUT_SECONDS)
-    assert current_gateway in sources, "no current route to break, got: %s" % current_gateway
+    assert current_gateway in sources, f"no current route to break, got: {current_gateway}"
 
     # Block whichever path currently carries the route so a switch is forced.
     blocked_source = sources[current_gateway]
