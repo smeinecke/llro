@@ -49,14 +49,19 @@ sequenceDiagram
 
 ## What Is Sent and Applied
 
-- Sent: ICMP probe packets from each `probe_source` to each monitored host.
-- Collected: route quality metrics (`avg_rtt`, `avg_loss`, `is_alive`) per host/path.
+- Sent: ICMP probe packets from each `probe_source` to each monitored host
+  (optionally pinned to the route's `device` via `SO_BINDTODEVICE` when
+  `bind_to_device` is enabled).
+- Collected: route quality metrics (`avg_rtt`, `avg_loss`, `is_alive`) per host/path,
+  smoothed with a configurable EWMA (`ewma_alpha`) before decisions.
 - Applied: `/32` destination routes on the host:
 `ip route add|replace <host>/32 via <gateway> dev <device> src <probe_source>`.
 
 ## Decision Outcome
 
 - Healthy best path available: route is switched or kept on that best path.
-- Path degraded: switch can occur based on loss/RTT threshold logic.
+- Path degraded: switch can occur based on loss/RTT threshold logic; RTT-improvement
+  switches are additionally rate-limited by `switch_cooldown`, while loss/dead
+  failover always applies immediately.
 - Manual override/freeze active: automatic switching is constrained by selected mode.
 - No valid path: optional fallback route is used, otherwise host route is removed.

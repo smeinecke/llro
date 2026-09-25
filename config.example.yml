@@ -25,11 +25,16 @@ fallback_routes:
 
 rtt_threshold: 20
 packet_loss_threshold: 2
-test_count: 5
+pings_per_probe: 5
+decision_cycles: 5
 test_interval: 1
 payload_size: 56
 scan_interval: 30
 delete_preadded_routes: true
+# probe_timeout: 2
+# bind_to_device: false
+# ewma_alpha: 0.4
+# switch_cooldown: 60
 # ip_bin: /usr/sbin/ip
 # admin_socket_path: /run/llro/admin.sock
 # systemd_logging: true

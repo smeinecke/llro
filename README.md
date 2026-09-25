@@ -61,10 +61,15 @@ fallback_routes:
 
 rtt_threshold: 20
 packet_loss_threshold: 2
-test_count: 5
+pings_per_probe: 5
+decision_cycles: 5
 test_interval: 1
 scan_interval: 30
 delete_preadded_routes: true
+# probe_timeout: 2
+# bind_to_device: false
+# ewma_alpha: 0.4
+# switch_cooldown: 60
 # ip_bin: /usr/sbin/ip
 # admin_socket_path: /run/llro/admin.sock
 ```
@@ -81,13 +86,28 @@ delete_preadded_routes: true
 - `fallback_routes`: optional fallback route name per monitored host.
 - `rtt_threshold`: minimum RTT improvement (ms) required before switching.
 - `packet_loss_threshold`: packet-loss threshold (%) that can force switching.
-- `test_count`: number of probe rounds aggregated before routing decisions.
+- `pings_per_probe`: ICMP echo requests sent per host per route in each probe cycle.
+- `decision_cycles`: number of probe cycles aggregated before a routing decision.
 - `test_interval`: interval between ping packets in a probe run.
+- `probe_timeout`: seconds to wait for each ICMP reply (default `2`).
 - `payload_size`: ICMP Echo Request payload size in bytes.
 - `scan_interval`: delay between scan cycles.
+- `bind_to_device`: bind probe sockets to each route's `device` (`SO_BINDTODEVICE`) so probes egress that interface (default `false`; see "Probe path pinning").
+- `ewma_alpha`: smoothing factor `(0, 1]` applied to per-route RTT/loss before decisions (default `0.4`; use `1.0` to disable smoothing).
+- `switch_cooldown`: minimum seconds between RTT-improvement switches per host (default `60`; `0` disables; loss/dead failover is never delayed).
+- `test_count`: deprecated; when set without the new keys it maps to both `pings_per_probe` and `decision_cycles`.
 - `delete_preadded_routes`: remove existing static `/32` routes for monitored hosts on startup.
 - `ip_bin`: optional `ip` binary path override.
 - `admin_socket_path`: Unix socket path used by `llro-cli` for admin/monitoring.
+
+## Probe path pinning
+
+Probes are sent with each route's `probe_source` as their source address. Source binding alone does **not** fix the egress interface: once a `<host>/32` route is installed, all probes for that host follow it in the forward direction, so per-uplink metrics reflect hybrid paths (forward via the current route, return via the probe's uplink) — and packets leaving one uplink with another uplink's source IP may be dropped by upstream anti-spoofing (uRPF), showing up as phantom loss.
+
+Two ways to make probes actually traverse the intended uplink:
+
+- `bind_to_device: true` — LLRO sets `SO_BINDTODEVICE` on each probe socket, pinning egress to the route's `device`. The bound interface still needs a usable route to the destination (e.g. its own default route in the main table); otherwise probes fail with `ENETUNREACH`. Requires `CAP_NET_RAW` (already required by LLRO).
+- Alternatively, keep `bind_to_device` off and configure per-source policy routing yourself, e.g. `ip rule from <probe_source> table <uplink-table>` plus a default route in that table. The probe's source binding then selects the right table.
 
 ## Legacy config compatibility
 

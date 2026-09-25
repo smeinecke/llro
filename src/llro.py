@@ -9,13 +9,17 @@ import os
 import re
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
+import time
 from typing import Any
 
 import yaml
-from icmplib import async_multiping
+from icmplib import Host, ICMPLibError, ICMPRequest, is_ipv6_address
+from icmplib.sockets import AsyncSocket, ICMPv4Socket, ICMPv6Socket
+from icmplib.utils import unique_identifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -267,9 +271,27 @@ def normalize_config(raw_config: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"Duplicate route name '{route['name']}'")
         route_names.add(route["name"])
 
-    test_count = _as_int(raw_config.get("test_count", 3), "test_count")
-    if test_count <= 0:
-        raise ConfigError("test_count must be greater than 0")
+    test_count_raw = raw_config.get("test_count")
+    test_count = None
+    if test_count_raw is not None:
+        test_count = _as_int(test_count_raw, "test_count")
+        if test_count <= 0:
+            raise ConfigError("test_count must be greater than 0")
+        logging.warning("test_count is deprecated; use pings_per_probe and decision_cycles instead")
+
+    pings_per_probe = _as_int(
+        raw_config.get("pings_per_probe", test_count if test_count is not None else 3),
+        "pings_per_probe",
+    )
+    if pings_per_probe <= 0:
+        raise ConfigError("pings_per_probe must be greater than 0")
+
+    decision_cycles = _as_int(
+        raw_config.get("decision_cycles", test_count if test_count is not None else 3),
+        "decision_cycles",
+    )
+    if decision_cycles <= 0:
+        raise ConfigError("decision_cycles must be greater than 0")
 
     packet_loss_threshold = _as_float(
         raw_config.get(
@@ -302,13 +324,19 @@ def normalize_config(raw_config: dict[str, Any]) -> dict[str, Any]:
         "packet_loss_threshold": packet_loss_threshold,
         # Keep legacy key to avoid breaking existing consumers/tests.
         "paketloss_threshold": packet_loss_threshold,
-        "test_count": test_count,
+        "test_count": test_count if test_count is not None else pings_per_probe,
+        "pings_per_probe": pings_per_probe,
+        "decision_cycles": decision_cycles,
         "test_interval": test_interval,
         "payload_size": payload_size,
         "scan_interval": scan_interval,
         "delete_preadded_routes": _as_bool(raw_config.get("delete_preadded_routes", False), "delete_preadded_routes"),
         "ip_bin": _validate_ip_bin(_as_non_empty_string(raw_config.get("ip_bin", "/usr/sbin/ip"), "ip_bin"), "ip_bin"),
         "ip_timeout": _as_float(raw_config.get("ip_timeout", 10), "ip_timeout"),
+        "probe_timeout": _as_float(raw_config.get("probe_timeout", 2.0), "probe_timeout"),
+        "bind_to_device": _as_bool(raw_config.get("bind_to_device", False), "bind_to_device"),
+        "ewma_alpha": _as_float(raw_config.get("ewma_alpha", 0.4), "ewma_alpha"),
+        "switch_cooldown": _as_float(raw_config.get("switch_cooldown", 60), "switch_cooldown"),
         "admin_socket_path": _validate_absolute_path(
             _as_non_empty_string(raw_config.get("admin_socket_path", DEFAULT_ADMIN_SOCKET_PATH), "admin_socket_path"),
             "admin_socket_path",
@@ -323,8 +351,94 @@ def normalize_config(raw_config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("packet_loss_threshold must be between 0 and 100")
     if normalized["ip_timeout"] <= 0:
         raise ConfigError("ip_timeout must be greater than 0")
+    if normalized["probe_timeout"] <= 0:
+        raise ConfigError("probe_timeout must be greater than 0")
+    if not 0 < normalized["ewma_alpha"] <= 1:
+        raise ConfigError("ewma_alpha must be in (0, 1]")
+    if normalized["switch_cooldown"] < 0:
+        raise ConfigError("switch_cooldown must be greater than or equal to 0")
 
     return normalized
+
+
+def _probe_socket_class(is_ipv6: bool, device: str | None) -> type:
+    base = ICMPv6Socket if is_ipv6 else ICMPv4Socket
+    if not device:
+        return base
+
+    class BoundSocket(base):  # type: ignore[misc]
+        def _create_socket(self, sock_type: int) -> socket.socket:
+            sock = super()._create_socket(sock_type)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, device.encode())
+            return sock
+
+    return BoundSocket
+
+
+async def _async_probe_host(
+    address: str,
+    *,
+    count: int,
+    interval: float,
+    timeout: float,
+    payload_size: int,
+    source: str | None,
+    device: str | None,
+    privileged: bool,
+) -> Host:
+    sock_cls = _probe_socket_class(is_ipv6_address(address), device)
+    request_id = unique_identifier()
+    packets_sent = 0
+    rtts: list[float] = []
+    with AsyncSocket(sock_cls(source, privileged)) as sock:
+        for sequence in range(count):
+            if sequence > 0:
+                await asyncio.sleep(interval)
+            request = ICMPRequest(
+                destination=address,
+                id=request_id,
+                sequence=sequence,
+                payload_size=payload_size,
+            )
+            try:
+                sock.send(request)
+                packets_sent += 1
+                reply = await sock.receive(request, timeout)  # pyright: ignore[reportArgumentType]
+                reply.raise_for_status()
+                rtts.append((reply.time - request.time) * 1000)
+            except ICMPLibError:
+                pass
+    return Host(address, packets_sent, rtts)
+
+
+async def async_multiping(
+    addresses: list[str],
+    *,
+    count: int,
+    interval: float,
+    timeout: float,
+    payload_size: int,
+    source: str | None = None,
+    device: str | None = None,
+    privileged: bool = True,
+) -> list[Host]:
+    return list(
+        await asyncio.gather(
+            *(
+                _async_probe_host(
+                    address,
+                    count=count,
+                    interval=interval,
+                    timeout=timeout,
+                    payload_size=payload_size,
+                    source=source,
+                    device=device,
+                    privileged=privileged,
+                )
+                for address in addresses
+            )
+        )
+    )
 
 
 class LowestLatencyRoutesOptimizer:
@@ -337,6 +451,8 @@ class LowestLatencyRoutesOptimizer:
         self.override_routes: dict[str, str] = {}
         self.switching_enabled: dict[str, bool] = dict.fromkeys(self.config["monitor"], True)
         self.last_probe_snapshot: dict[str, dict[str, dict[str, Any]]] = {}
+        self._ewma: dict[str, dict[str, dict[str, float]]] = {}
+        self._last_switch_at: dict[str, float] = {}
         self._state_lock: asyncio.Lock | None = None
         self._admin_server: asyncio.base_events.Server | None = None
 
@@ -358,8 +474,6 @@ class LowestLatencyRoutesOptimizer:
         Returns:
             None
         """
-        if self.config.get("delete_preadded_routes"):
-            self.clear_routes()
         asyncio.run(self.run_service())
 
     async def run_service(self) -> None:
@@ -373,6 +487,8 @@ class LowestLatencyRoutesOptimizer:
 
         await self._start_admin_server()
         try:
+            if self.config.get("delete_preadded_routes"):
+                await self.clear_routes()
             await self.run_async(stop_event)
         finally:
             if can_handle_signals:
@@ -439,6 +555,11 @@ class LowestLatencyRoutesOptimizer:
         async with self._get_state_lock():
             hosts = []
             for host in self.config["monitor"]:
+                routes_data = {name: dict(data) for name, data in self.last_probe_snapshot.get(host, {}).items()}
+                for name, smoothed in self._ewma.get(host, {}).items():
+                    entry = routes_data.setdefault(name, {})
+                    entry["ewma_rtt"] = round(smoothed["rtt"], 3)
+                    entry["ewma_loss"] = round(smoothed["loss"], 3)
                 hosts.append(
                     {
                         "host": host,
@@ -446,7 +567,7 @@ class LowestLatencyRoutesOptimizer:
                         "switching_enabled": bool(self.switching_enabled.get(host, True)),
                         "current_route": self.current_routes.get(host),
                         "override_route": self.override_routes.get(host),
-                        "routes": self.last_probe_snapshot.get(host, {}),
+                        "routes": routes_data,
                     }
                 )
         return {"hosts": hosts}
@@ -473,7 +594,7 @@ class LowestLatencyRoutesOptimizer:
                 self.route_modes[host] = "override"
                 self.switching_enabled[host] = True
                 self.override_routes[host] = route
-            applied = self.apply_route_config(host, route)
+            applied = await self.apply_route_config(host, route)
             return {
                 "ok": True,
                 "data": {"host": host, "mode": "override", "route": route, "route_applied": applied},
@@ -517,11 +638,12 @@ class LowestLatencyRoutesOptimizer:
     def _log_cmd(self, cmd: list[str]) -> None:
         logging.debug("cmd: %s", " ".join(shlex.quote(part) for part in cmd))
 
-    def _run_ip(self, args: list[str]) -> tuple[bool, str]:
+    async def _run_ip(self, args: list[str]) -> tuple[bool, str]:
         cmd = [self.config["ip_bin"]] + args
         self._log_cmd(cmd)
         try:
-            completed = subprocess.run(
+            completed = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 check=False,
                 capture_output=True,
@@ -546,7 +668,7 @@ class LowestLatencyRoutesOptimizer:
         error_text = stderr or stdout or (f"exit code {completed.returncode}")
         return False, error_text
 
-    def clear_routes(self):
+    async def clear_routes(self):
         """
         Clears the routes that are not needed.
 
@@ -565,15 +687,15 @@ class LowestLatencyRoutesOptimizer:
             hosts.update(self._destinations_for_host(host))
 
         for host in hosts:
-            self.clear_route(host)
+            await self.clear_route(host)
 
         self.current_routes = {}
 
         # set fallback routes as no route set
         for host, gateway in self.config.get("fallback_routes", {}).items():
-            self.apply_route_config(host, gateway)
+            await self.apply_route_config(host, gateway)
 
-    def clear_route(self, host: str) -> None:
+    async def clear_route(self, host: str) -> None:
         """
         Removes the route for the given host.
 
@@ -585,7 +707,7 @@ class LowestLatencyRoutesOptimizer:
         """
 
         logging.info("Remove %s", host)
-        ok, error_text = self._run_ip(["route", "del", _host_route_target(host)])
+        ok, error_text = await self._run_ip(["route", "del", _host_route_target(host)])
         if ok or "RTNETLINK answers: No such process" in error_text:
             self.current_routes.pop(host, None)
             return
@@ -605,11 +727,14 @@ class LowestLatencyRoutesOptimizer:
             cmd.extend(["src", route["probe_source"]])
         return cmd
 
-    def _route_exists(self, destination: str) -> bool:
-        cmd = [self.config["ip_bin"], "route", "show", _host_route_target(destination)]
+    async def _missing_destinations(self, destinations: list[str]) -> list[str]:
+        if not destinations:
+            return []
+        cmd = [self.config["ip_bin"], "-j", "route", "show"]
         self._log_cmd(cmd)
         try:
-            completed = subprocess.run(
+            completed = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 check=False,
                 capture_output=True,
@@ -617,15 +742,24 @@ class LowestLatencyRoutesOptimizer:
                 timeout=self.config.get("ip_timeout", 10),
             )
         except Exception as exc:
-            logging.warning("Failed to check route for %s: %s", destination, exc)
-            return True
+            logging.warning("Failed to list routes: %s", exc)
+            return []
         if completed.returncode != 0:
             error_text = (completed.stderr or completed.stdout or "").strip()
-            logging.warning("Failed to check route for %s: %s", destination, error_text)
-            return True
-        return bool(completed.stdout.strip())
+            logging.warning("Failed to list routes: %s", error_text)
+            return []
+        try:
+            entries = json.loads(completed.stdout or "[]")
+        except ValueError:
+            logging.warning("Failed to parse 'ip -j route show' output")
+            return []
+        existing = set()
+        for entry in entries:
+            dst = str(entry.get("dst", "")).split("/", 1)[0]
+            existing.add(_canonical_ip_or_value(dst))
+        return [destination for destination in destinations if destination not in existing]
 
-    def apply_route_config(self, host: str, route_name: str) -> bool:
+    async def apply_route_config(self, host: str, route_name: str) -> bool:
         """
         Applies the route configuration.
 
@@ -651,7 +785,7 @@ class LowestLatencyRoutesOptimizer:
         all_ok = True
         for destination in hosts_to_add:
             if destination not in self.current_routes:
-                ok, error_text = self._run_ip(self._route_cmd("add", destination, route))
+                ok, error_text = await self._run_ip(self._route_cmd("add", destination, route))
                 if ok:
                     self.current_routes[destination] = route_name
                     continue
@@ -660,7 +794,7 @@ class LowestLatencyRoutesOptimizer:
                     all_ok = False
                     continue
 
-            ok, error_text = self._run_ip(self._route_cmd("replace", destination, route))
+            ok, error_text = await self._run_ip(self._route_cmd("replace", destination, route))
             if not ok:
                 logging.error("Failed to replace route for %s: %s", destination, error_text)
                 all_ok = False
@@ -676,10 +810,12 @@ class LowestLatencyRoutesOptimizer:
                 asyncio.create_task(
                     async_multiping(
                         self.config["monitor"],
-                        count=self.config["test_count"],
+                        count=self.config["pings_per_probe"],
                         source=route["probe_source"],
                         interval=self.config["test_interval"],
+                        timeout=self.config["probe_timeout"],
                         payload_size=self.config["payload_size"],
+                        device=route["device"] if self.config["bind_to_device"] else None,
                     )
                 )
             )
@@ -755,6 +891,17 @@ class LowestLatencyRoutesOptimizer:
                 return True
         return False
 
+    def _ewma_metrics(self, host: str, route: str, rtt: float, loss: float) -> dict[str, float]:
+        alpha = self.config["ewma_alpha"]
+        state = self._ewma.setdefault(host, {})
+        prev = state.get(route)
+        if prev is None or alpha >= 1.0:
+            state[route] = {"rtt": rtt, "loss": loss}
+        else:
+            prev["rtt"] = alpha * rtt + (1 - alpha) * prev["rtt"]
+            prev["loss"] = alpha * loss + (1 - alpha) * prev["loss"]
+        return state[route]
+
     @staticmethod
     def _resolve_route_action(
         host: str,
@@ -763,9 +910,12 @@ class LowestLatencyRoutesOptimizer:
         mode: str,
         switching_enabled: bool,
         override_route: str | None,
-        host_results: dict[str, dict[str, float]],
+        host_metrics: dict[str, dict[str, float]],
         packet_loss_threshold: float,
         rtt_threshold: float,
+        now: float,
+        last_switch_at: float,
+        cooldown: float,
     ) -> tuple[str, str | None]:
         if mode == "override" and override_route:
             if current_route != override_route:
@@ -775,20 +925,19 @@ class LowestLatencyRoutesOptimizer:
         if mode == "frozen" or not switching_enabled:
             return "keep", None
 
-        if current_route is None or current_route not in host_results:
+        if current_route is None or current_route not in host_metrics:
             return "apply", best_route[0]
 
         if current_route == best_route[0]:
             logging.debug("%s: Current route is already the fastest route", host)
             return "keep", None
 
-        current_metrics = host_results[current_route]
-        current_loss = current_metrics["loss"] / current_metrics["checks"]
-        if current_metrics["alive"] == 0 or current_loss > packet_loss_threshold:
+        current_metrics = host_metrics[current_route]
+        if current_metrics["alive"] == 0 or current_metrics["loss"] > packet_loss_threshold:
             logging.warning("%s: Current route has packet loss, need to switch", host)
             return "apply", best_route[0]
 
-        current_rtt = current_metrics["rtt"] / current_metrics["alive"]
+        current_rtt = current_metrics["rtt"]
         rtt_diff = current_rtt - best_route[1]
         logging.debug(
             "%s: rtt_diff: %s, (%s) %s (%s) %s ",
@@ -810,23 +959,40 @@ class LowestLatencyRoutesOptimizer:
             )
             return "keep", None
 
+        if cooldown > 0 and now - last_switch_at < cooldown:
+            logging.info(
+                "%s: Route not changed to %s, switch cooldown active (%.1fs remaining)",
+                host,
+                best_route[0],
+                cooldown - (now - last_switch_at),
+            )
+            return "keep", None
+
         return "apply", best_route[0]
 
     async def _apply_routes_for_cycle(self, sums: dict[str, dict[str, dict[str, float]]]) -> list[str]:
+        now = time.monotonic()
         valid_source_found: list[str] = []
+        keep_hosts: list[str] = []
         for host, results in sums.items():
-            candidates: list[tuple[str, float, float]] = []
-            for source, metrics in results.items():
-                if metrics["alive"] == 0:
+            metrics: dict[str, dict[str, float]] = {}
+            for source, raw in results.items():
+                if raw["alive"] == 0:
                     continue
-                avg_rtt = metrics["rtt"] / metrics["alive"]
-                avg_loss = metrics["loss"] / metrics["checks"]
-                candidates.append((source, avg_rtt, avg_loss))
+                avg_rtt = raw["rtt"] / raw["alive"]
+                avg_loss = raw["loss"] / raw["checks"]
+                smoothed = self._ewma_metrics(host, source, avg_rtt, avg_loss)
+                metrics[source] = {
+                    "rtt": smoothed["rtt"],
+                    "loss": smoothed["loss"],
+                    "alive": raw["alive"],
+                }
                 logging.debug("%s: %s: %s %s", host, source, avg_rtt, avg_loss)
 
-            if not candidates:
+            if not metrics:
                 continue
-            best_route = sorted(candidates, key=lambda y: (y[2], y[1]))[0]
+            best = min(metrics.items(), key=lambda item: (item[1]["loss"], item[1]["rtt"]))
+            best_route = (best[0], best[1]["rtt"], best[1]["loss"])
             current_route = self.current_routes.get(host)
 
             async with self._get_state_lock():
@@ -841,29 +1007,40 @@ class LowestLatencyRoutesOptimizer:
                 mode,
                 switching_enabled,
                 override_route,
-                results,
+                metrics,
                 self.config["packet_loss_threshold"],
                 self.config["rtt_threshold"],
+                now,
+                self._last_switch_at.get(host, float("-inf")),
+                self.config["switch_cooldown"],
             )
 
             if action == "apply" and target_route:
-                self.apply_route_config(host, target_route)
+                if await self.apply_route_config(host, target_route):
+                    self._last_switch_at[host] = now
             elif action == "keep" and current_route:
-                missing = [
-                    destination
-                    for destination in self._destinations_for_host(host)
-                    if not self._route_exists(destination)
-                ]
-                if missing:
-                    logging.warning(
-                        "%s: kernel route missing for %s, re-applying %s",
-                        host,
-                        ", ".join(missing),
-                        current_route,
-                    )
-                    self.apply_route_config(host, current_route)
+                keep_hosts.append(host)
 
             valid_source_found.append(host)
+
+        dest_to_host: dict[str, str] = {}
+        for host in keep_hosts:
+            for destination in self._destinations_for_host(host):
+                dest_to_host[destination] = host
+        missing = await self._missing_destinations(list(dest_to_host))
+        missing_by_host: dict[str, list[str]] = {}
+        for destination in missing:
+            missing_by_host.setdefault(dest_to_host[destination], []).append(destination)
+        for host, destinations in missing_by_host.items():
+            current_route = self.current_routes.get(host)
+            logging.warning(
+                "%s: kernel route missing for %s, re-applying %s",
+                host,
+                ", ".join(destinations),
+                current_route,
+            )
+            if current_route:
+                await self.apply_route_config(host, current_route)
         return valid_source_found
 
     async def _handle_fallbacks(self, valid_source_found: list[str]) -> None:
@@ -876,17 +1053,17 @@ class LowestLatencyRoutesOptimizer:
                 switching_enabled = bool(self.switching_enabled.get(sip, True))
                 override_route = self.override_routes.get(sip)
             if mode == "override" and override_route:
-                self.apply_route_config(sip, override_route)
+                await self.apply_route_config(sip, override_route)
                 continue
             if mode == "frozen" or not switching_enabled:
                 continue
             fallback = self.config.get("fallback_routes", {}).get(sip)
             if fallback:
-                self.apply_route_config(sip, fallback)
+                await self.apply_route_config(sip, fallback)
             else:
                 logging.warning("No fallback routes configured for %s", sip)
                 for destination in self._destinations_for_host(sip):
-                    self.clear_route(destination)
+                    await self.clear_route(destination)
 
     async def _wait_interval(self, stop_event: asyncio.Event | None) -> None:
         if stop_event is None:
@@ -922,7 +1099,7 @@ class LowestLatencyRoutesOptimizer:
             sums = self._merge_sums(sums, new_sums)
             checks += 1
 
-            if checks >= self.config["test_count"] or force_reset or not self.current_routes:
+            if checks >= self.config["decision_cycles"] or force_reset or not self.current_routes:
                 valid_source_found = await self._apply_routes_for_cycle(sums)
                 await self._handle_fallbacks(valid_source_found)
                 checks = 0

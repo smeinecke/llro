@@ -74,16 +74,26 @@ def test_run_calls_clear_routes_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
             "delete_preadded_routes": True,
         }
     )
-    calls = {"clear": 0, "async": 0}
+    calls = []
 
-    async def fake_run_service() -> None:
-        calls["async"] += 1
+    async def fake_start() -> None:
+        calls.append("start")
 
-    monkeypatch.setattr(optimizer, "clear_routes", lambda: calls.__setitem__("clear", calls["clear"] + 1))
-    monkeypatch.setattr(optimizer, "run_service", fake_run_service)
+    async def fake_stop() -> None:
+        calls.append("stop")
+
+    async def fake_clear() -> None:
+        calls.append("clear")
+
+    async def fake_run_async(_stop_event: asyncio.Event) -> None:
+        calls.append("run")
+
+    monkeypatch.setattr(optimizer, "_start_admin_server", fake_start)
+    monkeypatch.setattr(optimizer, "_stop_admin_server", fake_stop)
+    monkeypatch.setattr(optimizer, "clear_routes", fake_clear)
+    monkeypatch.setattr(optimizer, "run_async", fake_run_async)
     optimizer.run()
-    assert calls["clear"] == 1
-    assert calls["async"] == 1
+    assert calls == ["start", "clear", "run", "stop"]
 
 
 def test_normalize_config_sets_default_admin_socket_path() -> None:
@@ -136,7 +146,7 @@ def test_apply_route_config_add_success_tracks_current_route(monkeypatch: pytest
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(llro.subprocess, "run", fake_run)
-    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    asyncio.run(optimizer.apply_route_config("1.1.1.1", "wan_a"))
 
     assert optimizer.current_routes["1.1.1.1"] == "wan_a"
     assert optimizer.current_routes["1.0.0.1"] == "wan_a"
@@ -156,7 +166,7 @@ def test_apply_route_config_replace_when_add_fails_with_exists(monkeypatch: pyte
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(llro.subprocess, "run", fake_run)
-    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    asyncio.run(optimizer.apply_route_config("1.1.1.1", "wan_a"))
     assert any(item[2] == "replace" for item in seen)
     assert optimizer.current_routes["1.1.1.1"] == "wan_a"
 
@@ -169,7 +179,7 @@ def test_clear_route_ignores_missing_route_error(monkeypatch: pytest.MonkeyPatch
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="RTNETLINK answers: No such process"),
     )
-    optimizer.clear_route("1.1.1.1")
+    asyncio.run(optimizer.clear_route("1.1.1.1"))
 
 
 def test_run_async_forwards_payload_size_to_multiping(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,7 +197,11 @@ def test_run_async_forwards_payload_size_to_multiping(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda _host, _route: None)
+
+    async def fake_apply(_host, _route):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -226,8 +240,17 @@ def test_run_async_applies_best_route_and_fallbacks(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    async def fake_clear(host):  # type: ignore[no-untyped-def]
+        cleared.append(host)
+
+    monkeypatch.setattr(optimizer, "clear_route", fake_clear)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -262,8 +285,17 @@ def test_run_async_keeps_current_route_when_diff_below_threshold(monkeypatch: py
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    monkeypatch.setattr(optimizer, "_route_exists", lambda _destination: True)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    async def fake_missing(_destinations):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -296,7 +328,12 @@ def test_run_async_switches_on_packet_loss(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -331,7 +368,12 @@ def test_run_async_switches_on_packet_loss_percent_units(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -372,8 +414,17 @@ def test_run_async_prefers_stable_route_over_flapping(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    monkeypatch.setattr(optimizer, "_route_exists", lambda _destination: True)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    async def fake_missing(_destinations):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -404,7 +455,11 @@ def test_run_async_frozen_host_not_cleared_when_probes_fail(monkeypatch: pytest.
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
+
+    async def fake_clear(host):  # type: ignore[no-untyped-def]
+        cleared.append(host)
+
+    monkeypatch.setattr(optimizer, "clear_route", fake_clear)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -422,7 +477,12 @@ def test_admin_actions_override_disable_reset(monkeypatch: pytest.MonkeyPatch) -
     }
     optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
     applied = []
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     response = asyncio.run(optimizer._handle_admin_action({"action": "override", "host": "1.1.1.1", "route": "wan_b"}))
     assert response["ok"] is True
@@ -445,6 +505,7 @@ def test_admin_status_and_validation_errors() -> None:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
     optimizer.current_routes["1.1.1.1"] = "wan_a"
     optimizer.last_probe_snapshot = {"1.1.1.1": {"wan_a": {"avg_rtt": 10.5, "avg_loss": 0, "is_alive": True}}}
+    optimizer._ewma["1.1.1.1"] = {"wan_a": {"rtt": 11.25, "loss": 1.5}}
 
     status = asyncio.run(optimizer._handle_admin_action({"action": "status"}))
     assert status["ok"] is True
@@ -452,6 +513,8 @@ def test_admin_status_and_validation_errors() -> None:
     assert host["host"] == "1.1.1.1"
     assert host["current_route"] == "wan_a"
     assert host["routes"]["wan_a"]["avg_rtt"] == 10.5
+    assert host["routes"]["wan_a"]["ewma_rtt"] == 11.25
+    assert host["routes"]["wan_a"]["ewma_loss"] == 1.5
 
     bad_route = asyncio.run(
         optimizer._handle_admin_action({"action": "override", "host": "1.1.1.1", "route": "missing"})
@@ -487,7 +550,12 @@ def test_run_async_respects_route_override(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -521,8 +589,17 @@ def test_run_async_freeze_blocks_switching(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    monkeypatch.setattr(optimizer, "_route_exists", lambda _destination: True)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    async def fake_missing(_destinations):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -629,7 +706,7 @@ def test_run_ip_handles_exception_stdout_and_exit_code(monkeypatch: pytest.Monke
         raise OSError("boom")
 
     monkeypatch.setattr(llro.subprocess, "run", raise_error)
-    ok, err = optimizer._run_ip(["route", "show"])
+    ok, err = asyncio.run(optimizer._run_ip(["route", "show"]))
     assert ok is False
     assert "boom" in err
 
@@ -638,7 +715,7 @@ def test_run_ip_handles_exception_stdout_and_exit_code(monkeypatch: pytest.Monke
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="shown", stderr=""),
     )
-    ok, err = optimizer._run_ip(["route", "show"])
+    ok, err = asyncio.run(optimizer._run_ip(["route", "show"]))
     assert ok is True
     assert err == ""
 
@@ -647,7 +724,7 @@ def test_run_ip_handles_exception_stdout_and_exit_code(monkeypatch: pytest.Monke
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=3, stdout="", stderr=""),
     )
-    ok, err = optimizer._run_ip(["route", "show"])
+    ok, err = asyncio.run(optimizer._run_ip(["route", "show"]))
     assert ok is False
     assert "exit code 3" in err
 
@@ -656,9 +733,13 @@ def test_clear_route_logs_error_for_unexpected_failure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
-    monkeypatch.setattr(optimizer, "_run_ip", lambda _args: (False, "permission denied"))
+
+    async def fake_run_ip(_args):  # type: ignore[no-untyped-def]
+        return False, "permission denied"
+
+    monkeypatch.setattr(optimizer, "_run_ip", fake_run_ip)
     caplog.set_level(logging.ERROR)
-    optimizer.clear_route("1.1.1.1")
+    asyncio.run(optimizer.clear_route("1.1.1.1"))
     assert "Failed to remove route for 1.1.1.1" in caplog.text
 
 
@@ -666,12 +747,12 @@ def test_apply_route_config_logs_errors(monkeypatch: pytest.MonkeyPatch, caplog:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
 
     caplog.set_level(logging.ERROR)
-    optimizer.apply_route_config("1.1.1.1", "missing")
+    asyncio.run(optimizer.apply_route_config("1.1.1.1", "missing"))
     assert "Unknown route 'missing'" in caplog.text
 
     calls = {"count": 0}
 
-    def fail_add_then_replace(_args):  # type: ignore[no-untyped-def]
+    async def fail_add_then_replace(_args):  # type: ignore[no-untyped-def]
         calls["count"] += 1
         if calls["count"] == 1:
             return False, "unexpected add failure"
@@ -679,11 +760,11 @@ def test_apply_route_config_logs_errors(monkeypatch: pytest.MonkeyPatch, caplog:
 
     monkeypatch.setattr(optimizer, "_run_ip", fail_add_then_replace)
     optimizer.current_routes["1.1.1.1"] = "wan_a"
-    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    asyncio.run(optimizer.apply_route_config("1.1.1.1", "wan_a"))
     assert "Failed to replace route for 1.1.1.1" in caplog.text
 
     optimizer.current_routes.clear()
-    optimizer.apply_route_config("1.1.1.1", "wan_a")
+    asyncio.run(optimizer.apply_route_config("1.1.1.1", "wan_a"))
     assert "Failed to add route for 1.1.1.1" in caplog.text
 
 
@@ -695,9 +776,18 @@ def test_clear_routes_applies_fallback_and_clears_tracking(monkeypatch: pytest.M
     optimizer.current_routes = {"1.1.1.1": "wan_a", "1.0.0.1": "wan_a"}
     cleared = []
     applied = []
-    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    optimizer.clear_routes()
+
+    async def fake_clear(host):  # type: ignore[no-untyped-def]
+        cleared.append(host)
+
+    monkeypatch.setattr(optimizer, "clear_route", fake_clear)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+    asyncio.run(optimizer.clear_routes())
     assert set(cleared) == {"1.1.1.1", "1.0.0.1"}
     assert optimizer.current_routes == {}
     assert applied == [("1.1.1.1", "wan_a")]
@@ -1028,7 +1118,7 @@ def test_run_ip_timeout_logs_distinct_error(monkeypatch: pytest.MonkeyPatch, cap
 
     monkeypatch.setattr(llro.subprocess, "run", raise_timeout)
     caplog.set_level(logging.ERROR)
-    ok, err = optimizer._run_ip(["route", "show"])
+    ok, err = asyncio.run(optimizer._run_ip(["route", "show"]))
     assert ok is False
     assert err == "timeout"
     assert "timed out" in caplog.text
@@ -1056,8 +1146,16 @@ def test_run_async_clears_also_route_on_probe_failure_without_fallback(monkeypat
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "clear_route", lambda host: cleared.append(host))
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda _host, _route: None)
+
+    async def fake_clear(host):  # type: ignore[no-untyped-def]
+        cleared.append(host)
+
+    monkeypatch.setattr(optimizer, "clear_route", fake_clear)
+
+    async def fake_apply(_host, _route):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -1069,25 +1167,48 @@ def test_run_async_clears_also_route_on_probe_failure_without_fallback(monkeypat
 def test_clear_route_drops_current_route_tracking(monkeypatch: pytest.MonkeyPatch) -> None:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
     optimizer.current_routes["1.1.1.1"] = "wan_a"
-    monkeypatch.setattr(optimizer, "_run_ip", lambda _args: (True, ""))
-    optimizer.clear_route("1.1.1.1")
+
+    async def fake_run_ip(_args):  # type: ignore[no-untyped-def]
+        return True, ""
+
+    monkeypatch.setattr(optimizer, "_run_ip", fake_run_ip)
+    asyncio.run(optimizer.clear_route("1.1.1.1"))
     assert "1.1.1.1" not in optimizer.current_routes
 
 
-def test_route_exists_reads_kernel_table(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_destinations_reads_kernel_table(monkeypatch: pytest.MonkeyPatch) -> None:
     optimizer = llro.LowestLatencyRoutesOptimizer(make_routes_config())
     monkeypatch.setattr(
         llro.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="1.1.1.1 via 10.0.0.254 dev eth0", stderr=""),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"dst": "1.1.1.1"}, {"dst": "default"}, {"dst": "10.0.0.0/24"}]),
+            stderr="",
+        ),
     )
-    assert optimizer._route_exists("1.1.1.1") is True
+    assert asyncio.run(optimizer._missing_destinations(["1.1.1.1", "8.8.8.8"])) == ["8.8.8.8"]
+
     monkeypatch.setattr(
         llro.subprocess,
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
     )
-    assert optimizer._route_exists("1.1.1.1") is False
+    assert asyncio.run(optimizer._missing_destinations(["1.1.1.1"])) == ["1.1.1.1"]
+
+    monkeypatch.setattr(
+        llro.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="failed"),
+    )
+    assert asyncio.run(optimizer._missing_destinations(["1.1.1.1"])) == []
+
+    monkeypatch.setattr(
+        llro.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="not-json", stderr=""),
+    )
+    assert asyncio.run(optimizer._missing_destinations(["1.1.1.1"])) == []
 
 
 def test_run_async_reapplies_route_missing_from_kernel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1115,8 +1236,17 @@ def test_run_async_reapplies_route_missing_from_kernel(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
-    monkeypatch.setattr(optimizer, "_route_exists", lambda _destination: False)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    async def fake_missing(destinations):  # type: ignore[no-untyped-def]
+        return list(destinations)
+
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
 
     with pytest.raises(StopLoop):
         asyncio.run(optimizer.run_async())
@@ -1142,14 +1272,23 @@ def test_run_async_recovers_route_cleared_during_outage(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(llro, "async_multiping", fake_multiping)
     monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(optimizer, "_run_ip", lambda _args: (True, ""))
-    monkeypatch.setattr(optimizer, "apply_route_config", lambda host, route: applied.append((host, route)))
+
+    async def fake_run_ip(_args):  # type: ignore[no-untyped-def]
+        return True, ""
+
+    monkeypatch.setattr(optimizer, "_run_ip", fake_run_ip)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
 
     real_clear_route = optimizer.clear_route
 
-    def tracked_clear(host: str) -> None:
+    async def tracked_clear(host: str) -> None:
         cleared.append(host)
-        real_clear_route(host)
+        await real_clear_route(host)
 
     monkeypatch.setattr(optimizer, "clear_route", tracked_clear)
 
@@ -1158,3 +1297,327 @@ def test_run_async_recovers_route_cleared_during_outage(monkeypatch: pytest.Monk
 
     assert "1.1.1.1" in cleared
     assert applied == [("1.1.1.1", "wan_a")]
+
+
+def test_probe_socket_class_binds_to_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class FakeSock:
+        def setsockopt(self, level, optname, value):  # type: ignore[no-untyped-def]
+            captured["opt"] = (level, optname, value)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(llro.ICMPv4Socket, "_create_socket", lambda _self, _type: FakeSock())
+    sock_cls = llro._probe_socket_class(False, "eth0")
+    assert issubclass(sock_cls, llro.ICMPv4Socket)
+    sock_cls()
+    import socket as stdlib_socket
+
+    assert captured["opt"] == (stdlib_socket.SOL_SOCKET, stdlib_socket.SO_BINDTODEVICE, b"eth0")
+
+    assert llro._probe_socket_class(False, None) is llro.ICMPv4Socket
+    assert issubclass(llro._probe_socket_class(True, "eth0"), llro.ICMPv6Socket)
+
+
+def test_run_async_bind_to_device_forwards_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make_routes_config()
+    cfg["bind_to_device"] = True
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    captured = {}
+
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
+        captured.update(kwargs)
+        return [make_host("1.1.1.1", True, 10, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+
+    async def fake_apply(_host, _route):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert captured.get("device") == "eth0"
+    assert captured.get("count") == 1
+    assert captured.get("timeout") == 2.0
+
+
+def test_normalize_config_test_count_alias_and_probe_options() -> None:
+    cfg = make_routes_config()
+    normalized = llro.normalize_config(cfg)
+    assert normalized["pings_per_probe"] == 1
+    assert normalized["decision_cycles"] == 1
+    assert normalized["probe_timeout"] == 2.0
+    assert normalized["bind_to_device"] is False
+    assert normalized["ewma_alpha"] == 0.4
+    assert normalized["switch_cooldown"] == 60
+
+    cfg = make_routes_config()
+    cfg["test_count"] = 5
+    normalized = llro.normalize_config(cfg)
+    assert normalized["pings_per_probe"] == 5
+    assert normalized["decision_cycles"] == 5
+
+    cfg["pings_per_probe"] = 2
+    cfg["decision_cycles"] = 4
+    normalized = llro.normalize_config(cfg)
+    assert normalized["pings_per_probe"] == 2
+    assert normalized["decision_cycles"] == 4
+
+
+def test_normalize_config_rejects_invalid_probe_and_stability_options() -> None:
+    cfg = make_routes_config()
+    cfg["pings_per_probe"] = 0
+    with pytest.raises(llro.ConfigError, match="pings_per_probe"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["decision_cycles"] = 0
+    with pytest.raises(llro.ConfigError, match="decision_cycles"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["ewma_alpha"] = 0
+    with pytest.raises(llro.ConfigError, match="ewma_alpha"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["ewma_alpha"] = 1.5
+    with pytest.raises(llro.ConfigError, match="ewma_alpha"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["switch_cooldown"] = -1
+    with pytest.raises(llro.ConfigError, match="switch_cooldown"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["probe_timeout"] = 0
+    with pytest.raises(llro.ConfigError, match="probe_timeout"):
+        llro.normalize_config(cfg)
+
+    cfg = make_routes_config()
+    cfg["bind_to_device"] = "maybe"
+    with pytest.raises(llro.ConfigError, match="boolean"):
+        llro.normalize_config(cfg)
+
+
+def test_run_async_ewma_dampens_single_bad_loss_round(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One 60%-loss probe round on the current route: with alpha=0.4 the smoothed
+    # loss stays below the 50% threshold and no switch happens.
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+        "pings_per_probe": 1,
+        "decision_cycles": 1,
+        "packet_loss_threshold": 50,
+        "rtt_threshold": 20,
+        "ewma_alpha": 0.4,
+        "switch_cooldown": 0,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    optimizer._ewma["1.1.1.1"] = {"wan_a": {"rtt": 40.0, "loss": 0.0}, "wan_b": {"rtt": 60.0, "loss": 0.0}}
+    applied = []
+
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
+        if kwargs["source"] == "10.0.0.1":
+            return [make_host("1.1.1.1", True, 40, 0.6)]
+        return [make_host("1.1.1.1", True, 60, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    async def fake_missing(_destinations):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert applied == []
+    assert optimizer._ewma["1.1.1.1"]["wan_a"]["loss"] == pytest.approx(24.0)
+
+
+def test_run_async_switch_cooldown_suppresses_improvement(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+        "pings_per_probe": 1,
+        "decision_cycles": 1,
+        "rtt_threshold": 20,
+        "ewma_alpha": 1.0,
+        "switch_cooldown": 60,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    optimizer._last_switch_at["1.1.1.1"] = llro.time.monotonic()
+    applied = []
+
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
+        if kwargs["source"] == "10.0.0.1":
+            return [make_host("1.1.1.1", True, 100, 0)]
+        return [make_host("1.1.1.1", True, 10, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    async def fake_missing(_destinations):  # type: ignore[no-untyped-def]
+        return []
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "_missing_destinations", fake_missing)
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert applied == []
+
+
+def test_run_async_switch_cooldown_does_not_block_loss_failover(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = {
+        "monitor": ["1.1.1.1"],
+        "routes": [
+            {"name": "wan_a", "device": "eth0", "probe_source": "10.0.0.1", "gateway": "10.0.0.254"},
+            {"name": "wan_b", "device": "eth1", "probe_source": "10.0.0.2", "gateway": "10.0.1.254"},
+        ],
+        "pings_per_probe": 1,
+        "decision_cycles": 1,
+        "packet_loss_threshold": 5,
+        "ewma_alpha": 1.0,
+        "switch_cooldown": 60,
+        "scan_interval": 0.01,
+    }
+    optimizer = llro.LowestLatencyRoutesOptimizer(cfg)
+    optimizer.current_routes = {"1.1.1.1": "wan_a"}
+    optimizer._last_switch_at["1.1.1.1"] = llro.time.monotonic()
+    applied = []
+
+    async def fake_multiping(_monitor: list[str], **kwargs: object) -> list[SimpleNamespace]:
+        if kwargs["source"] == "10.0.0.1":
+            return [make_host("1.1.1.1", True, 40, 50)]
+        return [make_host("1.1.1.1", True, 50, 0)]
+
+    async def fake_sleep(_seconds: float) -> None:
+        raise StopLoop()
+
+    async def fake_apply(host, route):  # type: ignore[no-untyped-def]
+        applied.append((host, route))
+        return True
+
+    monkeypatch.setattr(llro, "async_multiping", fake_multiping)
+    monkeypatch.setattr(llro.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(optimizer, "apply_route_config", fake_apply)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(optimizer.run_async())
+
+    assert ("1.1.1.1", "wan_b") in applied
+    assert optimizer._last_switch_at["1.1.1.1"] > 0
+
+
+def test_async_multiping_collects_rtts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeAsyncSocket:
+        def __init__(self, icmp_sock):  # type: ignore[no-untyped-def]
+            self._icmp_sock = icmp_sock
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return False
+
+        def send(self, _request):  # type: ignore[no-untyped-def]
+            pass
+
+        async def receive(self, request, timeout=2):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(time=request.time + 0.01, raise_for_status=lambda: None)
+
+    class FakeICMPSock:
+        def __init__(self, address=None, privileged=True):  # type: ignore[no-untyped-def]
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(llro, "AsyncSocket", FakeAsyncSocket)
+    monkeypatch.setattr(llro, "ICMPv4Socket", FakeICMPSock)
+
+    hosts = asyncio.run(llro.async_multiping(["1.1.1.1"], count=2, interval=0, timeout=1, payload_size=56))
+    assert hosts[0].is_alive
+    assert hosts[0].packets_sent == 2
+    assert hosts[0].avg_rtt == pytest.approx(10.0)
+
+
+def test_async_probe_host_counts_failed_replies(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeAsyncSocket:
+        def __init__(self, icmp_sock):  # type: ignore[no-untyped-def]
+            self._icmp_sock = icmp_sock
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return False
+
+        def send(self, _request):  # type: ignore[no-untyped-def]
+            pass
+
+        async def receive(self, request=None, timeout=2):  # type: ignore[no-untyped-def]
+            raise llro.ICMPLibError("timeout")
+
+    class FakeICMPSock:
+        def __init__(self, address=None, privileged=True):  # type: ignore[no-untyped-def]
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(llro, "AsyncSocket", FakeAsyncSocket)
+    monkeypatch.setattr(llro, "ICMPv4Socket", FakeICMPSock)
+
+    host = asyncio.run(
+        llro._async_probe_host(
+            "1.1.1.1",
+            count=1,
+            interval=0,
+            timeout=1,
+            payload_size=56,
+            source=None,
+            device=None,
+            privileged=True,
+        )
+    )
+    assert not host.is_alive
+    assert host.packets_sent == 1
