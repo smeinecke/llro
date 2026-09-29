@@ -105,7 +105,11 @@ skips = ["B404", "B603"]
 
 [tool.mutmut]
 source_paths = ["src/llro.py", "src/llro_cli.py"]
-pytest_add_cli_args_test_selection = ["tests/", "-m", "not integration", "--no-cov"]
+pytest_add_cli_args_test_selection = ["tests/", "-m", "not integration"]
+# --no-cov must apply to stats/mutant runs too: mutmut's own line-hit tracking
+# runs inside mutants/, where pytest-cov measures the expanded mutant file at
+# ~2% and the fail-under gate aborts the whole run during stats collection.
+pytest_add_cli_args = ["-x", "-q", "--no-cov", "--timeout=60"]
 mutate_only_covered_lines = true
 # Lines whose mutations can never change behaviour:
 #  - help=/description=/formatter_class: argparse metadata text
